@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+: "${DEVBOX_REAL_OPENCODE:?DEVBOX_REAL_OPENCODE is required}"
+: "${DEVBOX_OPENCODE_INTEGRITY_HELPER:?DEVBOX_OPENCODE_INTEGRITY_HELPER is required}"
+
+case "${1:-}" in
+plugin | plug)
+    exec "${DEVBOX_REAL_OPENCODE}" "$@"
+    ;;
+esac
+
+config_path="${XDG_CONFIG_HOME:-${HOME}/.config}/opencode/opencode.json"
+package_cache="${XDG_CACHE_HOME:-${HOME}/.cache}/opencode/packages"
+integrity_cache="${XDG_CACHE_HOME:-${HOME}/.cache}/devbox/opencode/plugin-integrity-v1.bin"
+
+if ! "${DEVBOX_OPENCODE_INTEGRITY_HELPER}" \
+    "${config_path}" "${package_cache}" "${integrity_cache}"; then
+    printf 'devbox: OpenCode plugin preflight failed; repair the listed plugins before launch\n' >&2
+    exit 1
+fi
+exec "${DEVBOX_REAL_OPENCODE}" "$@"

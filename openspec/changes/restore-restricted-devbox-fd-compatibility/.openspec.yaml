@@ -1,0 +1,4 @@
+schema: ramona-plan
+created: 2026-08-24
+idea: preserve-bounded-devbox-unix-interfaces
+skip_specs: true

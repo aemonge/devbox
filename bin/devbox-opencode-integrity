@@ -1,0 +1,619 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034 # Cache-hit state is retained from the validated devbox implementation.
+# Structural OpenCode plugin preflight used by devbox.
+# Derived from devbox's validated plugin-integrity implementation.
+set -euo pipefail
+
+PROGRAM_NAME="devbox"
+HOST_HOME="${HOME}"
+DEVBOX_PLUGIN_WATCH_PATHS=()
+DEVBOX_PLUGIN_UNIQUE_PATHS=()
+DEVBOX_PLUGIN_INTEGRITY_CACHE_HIT=0
+
+error() {
+    printf '%s: %s\n' "${PROGRAM_NAME}" "$*" >&2
+}
+
+trace_startup() { :; }
+
+json_escape() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    printf '%s' "${value}"
+}
+
+watch_plugin_integrity_path() {
+    DEVBOX_PLUGIN_WATCH_PATHS+=("$1")
+}
+
+is_local_plugin_spec() {
+    case "$1" in
+    /* | ./* | ../* | \~ | \~/* | file:*) return 0 ;;
+    esac
+    return 1
+}
+
+resolve_local_plugin_path() {
+    local spec="$1"
+    local config_dir="$2"
+    local path="${spec#file:}"
+
+    case "${path}" in
+    \~) path="${HOST_HOME}" ;;
+    \~/*) path="${HOST_HOME}/${path#\~/}" ;;
+    /*) ;;
+    *) path="${config_dir}/${path}" ;;
+    esac
+
+    realpath -ms -- "${path}"
+}
+
+opencode_plugin_cache_key() {
+    local spec="$1"
+    local scoped_tail
+
+    case "${spec}" in
+    git+* | github:* | http://* | https://* | *@git+* | *@github:*)
+        printf '%s\n' "${spec}"
+        return
+        ;;
+    @*/*)
+        scoped_tail="${spec#*/}"
+        if [[ "${scoped_tail}" == *@* ]]; then
+            printf '%s\n' "${spec}"
+        else
+            printf '%s@latest\n' "${spec}"
+        fi
+        ;;
+    *@*) printf '%s\n' "${spec}" ;;
+    *) printf '%s@latest\n' "${spec}" ;;
+    esac
+}
+
+is_valid_package_manifest() {
+    local package_dir="$1"
+    local manifest="${package_dir}/package.json"
+    local jq_bin="${DEVBOX_JQ_BIN:-jq}"
+
+    [[ -f "${manifest}" ]] && "${jq_bin}" -e 'type == "object"' "${manifest}" >/dev/null 2>&1
+}
+
+resolve_contained_path() {
+    local root
+    local candidate
+    local relative
+
+    root="$(realpath -m -- "$1")" || return 1
+    candidate="$(realpath -m -- "$2")" || return 1
+    relative="$(realpath -m --relative-to="${root}" -- "${candidate}")" || return 1
+
+    case "${relative}" in
+    .. | ../* | /*) return 1 ;;
+    esac
+
+    printf '%s\n' "${candidate}"
+}
+
+resolve_plugin_entry() {
+    local package_dir="$1"
+    local manifest="${package_dir}/package.json"
+    local jq_bin="${DEVBOX_JQ_BIN:-jq}"
+    local entry
+    local entry_candidate
+
+    if [[ -f "${manifest}" ]]; then
+        is_valid_package_manifest "${package_dir}" || return 1
+        entry="$("${jq_bin}" -er '
+            [
+                if (.exports? | type) == "string" then .exports else null end,
+                if (.exports?["."]? | type) == "string" then .exports["."] else null end,
+                if ((.exports?["."]? | type) == "object") and
+                    ((.exports["."].import? | type) == "string")
+                then .exports["."].import else null end,
+                if ((.exports?["."]? | type) == "object") and
+                    ((.exports["."].default? | type) == "string")
+                then .exports["."].default else null end,
+                if ((.exports?["."]? | type) == "object") and
+                    ((.exports["."].require? | type) == "string")
+                then .exports["."].require else null end,
+                if ((.exports? | type) == "object") and
+                    ((.exports.import? | type) == "string")
+                then .exports.import else null end,
+                if ((.exports? | type) == "object") and
+                    ((.exports.default? | type) == "string")
+                then .exports.default else null end,
+                if ((.exports? | type) == "object") and
+                    ((.exports.require? | type) == "string")
+                then .exports.require else null end,
+                if (.module? | type) == "string" then .module else null end,
+                if (.main? | type) == "string" then .main else null end
+            ] | map(select(type == "string" and length > 0)) | .[0] // empty
+        ' "${manifest}" 2>/dev/null || true)"
+
+        if [[ -n "${entry}" ]]; then
+            case "${entry}" in
+            /*) entry_candidate="${entry}" ;;
+            *) entry_candidate="${package_dir}/${entry#./}" ;;
+            esac
+            if ! resolve_contained_path "${package_dir}" "${entry_candidate}" >/dev/null; then
+                return 2
+            fi
+            printf '%s\n' "${entry_candidate}"
+            return 0
+        fi
+    fi
+
+    for entry in index.js index.mjs index.ts; do
+        entry_candidate="${package_dir}/${entry}"
+        if ! resolve_contained_path "${package_dir}" "${entry_candidate}" >/dev/null; then
+            return 2
+        fi
+        if [[ -f "${entry_candidate}" ]]; then
+            printf '%s\n' "${entry_candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+report_external_plugin_failure() {
+    local spec="$1"
+    local reason="$2"
+    local path="$3"
+
+    error "plugin '${spec}': ${reason}: ${path}"
+    printf '  repair: opencode plugin --global --force %q\n' "${spec}" >&2
+}
+
+report_local_plugin_failure() {
+    local spec="$1"
+    local reason="$2"
+    local path="$3"
+
+    error "plugin '${spec}': ${reason}: ${path}"
+    printf '  repair: restore the local plugin or correct its configured path: %q\n' "${spec}" >&2
+}
+
+check_local_plugin() {
+    local spec="$1"
+    local config_dir="$2"
+    local path
+    local entry
+    local entry_status
+
+    path="$(resolve_local_plugin_path "${spec}" "${config_dir}")"
+    if [[ -f "${path}" ]]; then
+        watch_plugin_integrity_path "${path}"
+        return 0
+    fi
+    if [[ ! -d "${path}" ]]; then
+        report_local_plugin_failure "${spec}" "local path is missing" "${path}"
+        return 1
+    fi
+    watch_plugin_integrity_path "${path}"
+    if [[ -f "${path}/package.json" ]] && ! is_valid_package_manifest "${path}"; then
+        report_local_plugin_failure "${spec}" "local package manifest is invalid" "${path}/package.json"
+        return 1
+    fi
+    if [[ -f "${path}/package.json" ]]; then
+        watch_plugin_integrity_path "${path}/package.json"
+    fi
+
+    if entry="$(resolve_plugin_entry "${path}")"; then
+        if [[ -f "${entry}" ]]; then
+            watch_plugin_integrity_path "${entry}"
+            return 0
+        fi
+    else
+        entry_status=$?
+        if [[ ${entry_status} -eq 2 ]]; then
+            report_local_plugin_failure "${spec}" "entry point escapes package directory" "${path}/package.json"
+            return 1
+        fi
+    fi
+    if [[ -z "${entry:-}" || ! -f "${entry}" ]]; then
+        report_local_plugin_failure "${spec}" "local package entry point is missing" "${entry:-${path}}"
+        return 1
+    fi
+}
+
+check_external_plugin() {
+    local spec="$1"
+    local cache_root="$2"
+    local jq_bin="${DEVBOX_JQ_BIN:-jq}"
+    local cache_key
+    local wrapper
+    local dependency
+    local dependency_count
+    local cache_root_path
+    local wrapper_candidate
+    local package_dir
+    local package_candidate
+    local node_modules_root
+    local entry
+    local entry_status
+
+    cache_key="$(opencode_plugin_cache_key "${spec}")"
+    cache_root_path="$(realpath -m -- "${cache_root}")"
+    wrapper_candidate="${cache_root_path}/${cache_key}"
+    if ! wrapper="$(resolve_contained_path "${cache_root_path}" "${wrapper_candidate}")"; then
+        report_external_plugin_failure "${spec}" "cache wrapper escapes cache root" "${wrapper_candidate}"
+        return 1
+    fi
+    if [[ ! -f "${wrapper}/package.json" ]]; then
+        report_external_plugin_failure "${spec}" "cache wrapper is missing" "${wrapper}"
+        return 1
+    fi
+    watch_plugin_integrity_path "${wrapper_candidate}"
+    watch_plugin_integrity_path "${wrapper_candidate}/package.json"
+    if ! is_valid_package_manifest "${wrapper}"; then
+        report_external_plugin_failure "${spec}" "cache wrapper manifest is invalid" "${wrapper}/package.json"
+        return 1
+    fi
+    if ! "${jq_bin}" -e '(.dependencies? | type) == "object"' "${wrapper}/package.json" >/dev/null 2>&1; then
+        report_external_plugin_failure "${spec}" "cache wrapper dependencies must be a JSON object" "${wrapper}/package.json"
+        return 1
+    fi
+
+    if ! dependency_count="$("${jq_bin}" -er '.dependencies | keys | length' "${wrapper}/package.json" 2>/dev/null)"; then
+        report_external_plugin_failure "${spec}" "cache wrapper manifest is invalid" "${wrapper}/package.json"
+        return 1
+    fi
+    if [[ "${dependency_count}" -ne 1 ]]; then
+        report_external_plugin_failure "${spec}" "cache wrapper must contain exactly one dependency" "${wrapper}/package.json"
+        return 1
+    fi
+
+    if ! dependency="$("${jq_bin}" -er '.dependencies // {} | keys[0]' "${wrapper}/package.json" 2>/dev/null)"; then
+        report_external_plugin_failure "${spec}" "cache wrapper dependency is invalid" "${wrapper}/package.json"
+        return 1
+    fi
+    if ! node_modules_root="$(resolve_contained_path "${wrapper}" "${wrapper}/node_modules")"; then
+        report_external_plugin_failure "${spec}" "installed package escapes node_modules" "${wrapper}/node_modules"
+        return 1
+    fi
+    case "${dependency}" in
+    /*) package_candidate="${dependency}" ;;
+    *) package_candidate="${node_modules_root}/${dependency}" ;;
+    esac
+    if ! package_dir="$(resolve_contained_path "${node_modules_root}" "${package_candidate}")"; then
+        report_external_plugin_failure "${spec}" "installed package escapes node_modules" "${package_candidate}"
+        return 1
+    fi
+    if [[ ! -f "${package_dir}/package.json" ]]; then
+        report_external_plugin_failure "${spec}" "installed package is missing" "${package_dir}"
+        return 1
+    fi
+    watch_plugin_integrity_path "${package_candidate}"
+    watch_plugin_integrity_path "${package_candidate}/package.json"
+    if ! is_valid_package_manifest "${package_dir}"; then
+        report_external_plugin_failure "${spec}" "installed package manifest is invalid" "${package_dir}/package.json"
+        return 1
+    fi
+
+    if entry="$(resolve_plugin_entry "${package_dir}")"; then
+        if [[ -f "${entry}" ]]; then
+            watch_plugin_integrity_path "${entry}"
+            return 0
+        fi
+    else
+        entry_status=$?
+        if [[ ${entry_status} -eq 2 ]]; then
+            report_external_plugin_failure "${spec}" "entry point escapes package directory" "${package_dir}/package.json"
+            return 1
+        fi
+    fi
+    if [[ -z "${entry:-}" || ! -f "${entry}" ]]; then
+        report_external_plugin_failure "${spec}" "entry point is missing" "${entry:-${package_dir}}"
+        return 1
+    fi
+}
+
+check_opencode_plugins() {
+    local config_path="$1"
+    local cache_root="$2"
+    local jq_bin="${DEVBOX_JQ_BIN:-jq}"
+    local config_dir
+    local index
+    local plugin_count
+    local spec
+    local failures=0
+
+    DEVBOX_PLUGIN_WATCH_PATHS=()
+    [[ -f "${config_path}" ]] || return 0
+    watch_plugin_integrity_path "${config_path}"
+    if ! command -v "${jq_bin}" >/dev/null 2>&1 && [[ ! -x "${jq_bin}" ]]; then
+        error "OpenCode plugin preflight requires jq: ${jq_bin}"
+        return 1
+    fi
+    if ! "${jq_bin}" -e '
+        if has("plugin") then
+            if (.plugin | type) != "array" then false
+            else all(.plugin[];
+                (type == "string") or
+                ((type == "array") and (length == 2) and
+                    ((.[0] | type) == "string") and ((.[1] | type) == "object"))
+            )
+            end
+        else true
+        end
+    ' "${config_path}" >/dev/null 2>&1; then
+        error "invalid OpenCode plugin configuration: ${config_path}"
+        return 1
+    fi
+
+    config_dir="$(dirname "${config_path}")"
+    if ! plugin_count="$("${jq_bin}" -er 'if has("plugin") then (.plugin | length) else 0 end' "${config_path}")"; then
+        error "invalid OpenCode plugin configuration: ${config_path}"
+        return 1
+    fi
+    for ((index = 0; index < plugin_count; index++)); do
+        # shellcheck disable=SC2016 # $index is a jq variable.
+        if ! spec="$("${jq_bin}" -er --argjson index "${index}" '
+            .plugin[$index] | if type == "array" then .[0] else . end
+        ' "${config_path}")"; then
+            error "invalid OpenCode plugin entry at index ${index}: ${config_path}"
+            failures=$((failures + 1))
+            continue
+        fi
+        if is_local_plugin_spec "${spec}"; then
+            check_local_plugin "${spec}" "${config_dir}" || failures=$((failures + 1))
+        else
+            check_external_plugin "${spec}" "${cache_root}" || failures=$((failures + 1))
+        fi
+    done
+
+    [[ ${failures} -eq 0 ]]
+}
+
+plugin_integrity_digest_stream() {
+    local record
+    local digest
+    while IFS= read -r -d '' record; do
+        digest="${record%% *}"
+        if [[ ! "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            return 1
+        fi
+        printf '%s\0' "${digest}"
+    done
+}
+
+plugin_integrity_path_fingerprint() {
+    local fingerprint
+    local path
+    local index=0
+    local -a file_paths=()
+    local -a directory_paths=()
+    local -a directory_entries=()
+    local snapshot_file
+
+    for path in "$@"; do
+        if [[ -f "${path}" ]]; then
+            file_paths+=("${path}")
+        elif [[ -d "${path}" ]]; then
+            directory_paths+=("${path}")
+        else
+            return 1
+        fi
+    done
+
+    if [[ ${#directory_paths[@]} -gt 0 ]]; then
+        snapshot_file="$(mktemp "${TMPDIR:-/tmp}/devbox-plugin-paths.XXXXXX")" || return 1
+        if ! find -H "${directory_paths[@]}" -mindepth 1 -maxdepth 1 -print0 | sort -z >"${snapshot_file}"; then
+            rm -f -- "${snapshot_file}"
+            return 1
+        fi
+        if ! mapfile -d '' -t directory_entries <"${snapshot_file}"; then
+            rm -f -- "${snapshot_file}"
+            return 1
+        fi
+        rm -f -- "${snapshot_file}"
+    fi
+
+    # Path-spelling independent by design: bind mounts alias the same inodes
+    # at different paths (host preflight vs sandbox guard), so the stream
+    # carries stat identity, stored symlink targets, and content hashes only.
+    fingerprint="$({
+        printf 'devbox-plugin-integrity-fingerprint-v2\0'
+        printf 'salt\0%s\0' "${DEVBOX_PLUGIN_INTEGRITY_SALT:-}"
+        printf 'count\0%s\0' "$#"
+        for path in "$@"; do
+            index=$((index + 1))
+            stat --printf="item\0${index}\0identity\0%F:%s:%Y:%i\0" -- "${path}" || return 1
+            if [[ -L "${path}" ]]; then
+                printf 'link\0%s\0' "$(readlink -- "${path}")"
+            fi
+        done
+        if [[ ${#file_paths[@]} -gt 0 ]]; then
+            sha256sum -z -- "${file_paths[@]}" | plugin_integrity_digest_stream || return 1
+        fi
+        for path in "${directory_entries[@]}"; do
+            stat --printf='entry\0identity\0%F:%s:%Y:%i\0' -- "${path}" || return 1
+            printf 'name\0%s\0' "${path##*/}"
+            if [[ -L "${path}" ]]; then
+                printf 'link\0%s\0' "$(readlink -- "${path}")"
+            fi
+        done
+    } | sha256sum)" || return 1
+    REPLY="${fingerprint%% *}"
+}
+
+is_plugin_integrity_cache_current() {
+    local cache_file="$1"
+    local integrity_token="$2"
+    local current_config="$3"
+    local cache_fd
+    local header
+    local expected_fingerprint
+    local path=""
+    local -a cached_paths=()
+    local owner
+    local mode
+
+    [[ -f "${cache_file}" && ! -L "${cache_file}" ]] || return 1
+    owner="$(stat -c %u -- "${cache_file}")" || return 1
+    mode="$(stat -c %a -- "${cache_file}")" || return 1
+    [[ "${owner}" == "$(id -u)" && "${mode}" == "600" ]] || return 1
+
+    exec {cache_fd}<"${cache_file}" || return 1
+    if ! IFS= read -r -d '' header <&"${cache_fd}" || [[ "${header}" != "devbox-plugin-integrity-v2" ]]; then
+        exec {cache_fd}<&-
+        return 1
+    fi
+    if ! IFS= read -r -d '' expected_fingerprint <&"${cache_fd}"; then
+        exec {cache_fd}<&-
+        return 1
+    fi
+
+    while IFS= read -r -d '' path <&"${cache_fd}"; do
+        cached_paths+=("${path}")
+        path=""
+    done
+    exec {cache_fd}<&-
+
+    [[ -z "${path}" && ${#cached_paths[@]} -ge 2 ]] || return 1
+    [[ "${cached_paths[0]}" == "${integrity_token}" && "${cached_paths[1]}" == "${current_config}" ]] || return 1
+    plugin_integrity_path_fingerprint "${cached_paths[@]:1}" && [[ "${REPLY}" == "${expected_fingerprint}" ]]
+}
+
+collect_plugin_integrity_paths() {
+    local path
+    local -A watched_paths=()
+
+    DEVBOX_PLUGIN_UNIQUE_PATHS=()
+    for path in "${DEVBOX_PLUGIN_WATCH_PATHS[@]}"; do
+        if [[ -n "${watched_paths[${path}]+set}" ]]; then
+            continue
+        fi
+        watched_paths[${path}]=1
+        DEVBOX_PLUGIN_UNIQUE_PATHS+=("${path}")
+    done
+}
+
+write_plugin_integrity_cache() {
+    local cache_file="$1"
+    local fingerprint="$2"
+    shift 2
+    local cache_dir
+    local temporary_file
+
+    cache_dir="$(dirname -- "${cache_file}")"
+    mkdir -p "${cache_dir}" || return 1
+    umask 077
+    temporary_file="$(mktemp "${cache_file}.tmp.XXXXXX")" || return 1
+
+    if ! {
+        printf 'devbox-plugin-integrity-v2\0'
+        printf '%s\0' "${fingerprint}"
+        printf '%s\0' "$@"
+    } >"${temporary_file}"; then
+        rm -f -- "${temporary_file}"
+        return 1
+    fi
+
+    if ! chmod 600 "${temporary_file}" || ! mv -f -- "${temporary_file}" "${cache_file}"; then
+        rm -f -- "${temporary_file}"
+        return 1
+    fi
+}
+
+plugin_integrity_cache_validation_hook() { :; }
+
+check_opencode_plugins_cached() {
+    local script_path="$1"
+    local config_path="$2"
+    local cache_root="$3"
+    local integrity_cache="$4"
+    local integrity_token="devbox-opencode-integrity"
+    local script_digest=""
+    local first_fingerprint
+    local second_fingerprint
+    local index
+    local -a first_paths=()
+    local -a second_paths=()
+
+    # Script identity is its content, not its invocation path: the host
+    # preflight and the sandbox guard run this same file through different
+    # bind-mount spellings and must reach the same cache decision.
+    if ! script_digest="$(sha256sum -- "${script_path}")"; then
+        error "OpenCode plugin integrity helper is unreadable: ${script_path}"
+        return 1
+    fi
+    script_digest="${script_digest%% *}"
+    DEVBOX_PLUGIN_INTEGRITY_SALT="helper-sha256:${script_digest}"
+
+    DEVBOX_PLUGIN_INTEGRITY_CACHE_HIT=0
+    if command -v sha256sum >/dev/null 2>&1 &&
+        is_plugin_integrity_cache_current "${integrity_cache}" "${integrity_token}" "${config_path}"; then
+        DEVBOX_PLUGIN_INTEGRITY_CACHE_HIT=1
+        trace_startup "OpenCode plugin integrity cache hit"
+        return 0
+    fi
+
+    trace_startup "OpenCode plugin integrity cache miss"
+    rm -f -- "${integrity_cache}"
+    if ! check_opencode_plugins "${config_path}" "${cache_root}"; then
+        return 1
+    fi
+    [[ -f "${config_path}" ]] || return 0
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        return 0
+    fi
+
+    collect_plugin_integrity_paths
+    first_paths=("${DEVBOX_PLUGIN_UNIQUE_PATHS[@]}")
+    if ! plugin_integrity_path_fingerprint "${first_paths[@]}"; then
+        error "OpenCode plugin integrity changed after successful validation"
+        return 1
+    fi
+    first_fingerprint="${REPLY}"
+
+    plugin_integrity_cache_validation_hook
+    if ! check_opencode_plugins "${config_path}" "${cache_root}"; then
+        return 1
+    fi
+    collect_plugin_integrity_paths
+    second_paths=("${DEVBOX_PLUGIN_UNIQUE_PATHS[@]}")
+    if ! plugin_integrity_path_fingerprint "${second_paths[@]}"; then
+        error "OpenCode plugin integrity changed after repeated validation"
+        return 1
+    fi
+    second_fingerprint="${REPLY}"
+
+    if [[ ${#first_paths[@]} -ne ${#second_paths[@]} || "${first_fingerprint}" != "${second_fingerprint}" ]]; then
+        error "OpenCode plugin integrity changed between validation passes"
+        return 1
+    fi
+    for ((index = 0; index < ${#first_paths[@]}; index++)); do
+        if [[ "${first_paths[index]}" != "${second_paths[index]}" ]]; then
+            error "OpenCode plugin watched paths changed between validation passes"
+            return 1
+        fi
+    done
+
+    if ! write_plugin_integrity_cache "${integrity_cache}" "${second_fingerprint}" \
+        "${integrity_token}" "${second_paths[@]}"; then
+        error "OpenCode plugin integrity changed while caching successful validation"
+        rm -f -- "${integrity_cache}"
+        return 1
+    fi
+}
+
+main() {
+    local config_path="${1:-${XDG_CONFIG_HOME:-${HOME}/.config}/opencode/opencode.json}"
+    local package_cache="${2:-${XDG_CACHE_HOME:-${HOME}/.cache}/opencode/packages}"
+    local integrity_cache="${3:-${XDG_CACHE_HOME:-${HOME}/.cache}/devbox/opencode/plugin-integrity-v1.bin}"
+
+    if [[ "${DEVBOX_OPENCODE_INTEGRITY_NO_CACHE:-0}" == 1 ]]; then
+        check_opencode_plugins "${config_path}" "${package_cache}"
+    else
+        check_opencode_plugins_cached "$0" "${config_path}" "${package_cache}" "${integrity_cache}"
+    fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

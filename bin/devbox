@@ -1,0 +1,3810 @@
+#!/usr/bin/env bash
+
+# devbox - Mount-isolated developer box using Bubblewrap.
+# One development environment for interactive shells, Pi, OpenCode, and tools.
+
+set -euo pipefail
+
+readonly PROGRAM_NAME="devbox"
+readonly PROGRAM_VERSION="0.2.0"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")" && pwd -P)"
+readonly SCRIPT_DIR
+readonly DEVBOX_AGENT_CONTEXT_HOST="${SCRIPT_DIR}/devbox-agent-context.md"
+readonly DEVBOX_AGENT_CONTEXT_SANDBOX="/devbox/agent-context.md"
+
+readonly RED='\033[0;31m'
+readonly YELLOW='\033[1;33m'
+readonly GREEN='\033[0;32m'
+readonly NC='\033[0m'
+
+usage() {
+    cat <<'USAGE_EOF'
+devbox 0.1.0
+Mount-isolated developer box using Bubblewrap.
+
+Usage:
+  devbox [COMMAND [ARG...]] [-- [TARGET] [DEVBOX_OPTIONS...]]
+
+Arguments before the first "--" are executed inside the box. Use "---" before
+the delimiter to pass a literal "--" to the child command. With no command,
+devbox starts an interactive Zsh login shell. Arguments after "--" select the
+target and configure the box.
+
+Options after "--":
+  -h, --help                 Show this help and exit
+  -V, --version              Show version and exit
+  -a, --add PATH             Add an extra path read-only
+  -A, --add-rw PATH          Add an extra path read-write
+  -q, --quiet                Suppress non-essential output
+  -v, --verbose              Show startup diagnostics
+      --doctor               Run comprehensive diagnostics and exit
+      --validate             Run comprehensive validation tests and exit
+      --ro                   Mount target read-only
+      --rw                   Mount target read-write (default)
+      --allow-infra          Allow writes to protected target infrastructure
+      --allow-pi-config      Allow Pi config writes; keep machine state isolated
+      --allow-host-tools     Bind host development tools (default)
+      --no-host-tools        Disable host development tool binds
+      --locked               Read-only, offline, credential-free hardened preset
+      --aws                  Expose AWS credentials/configuration (default)
+      --no-aws               Hide AWS files and AWS_* environment variables
+      --clipboard            Expose detected Wayland/X11 clipboard (default)
+      --no-clipboard         Disable clipboard socket forwarding
+      --no-network           Unshare the network namespace
+      --no-nvim-remote       Disable the active Neovim socket/editor bridge
+      --no-terminal-sockets  Disable Neovim and tmux socket forwarding
+  -s, --ssh-agent           Forward SSH_AUTH_SOCK into the sandbox (opt-in)
+      --no-ssh-agent        Do not forward SSH_AUTH_SOCK
+  -g, --allow-gui            Allow broader GUI/session access
+  -w, --web-developer        Enable GUI mode and Chromium DevTools
+      --full-dev             Allow full /dev access inside the box
+
+Examples:
+  devbox                              # zsh in $PWD
+  devbox -- ~/src/project             # zsh in the selected target
+  devbox pi "fix this" -- ~/src/app   # Pi in the shared developer box
+  devbox opencode -- ~/src/app -w     # OpenCode with browser developer mode
+  devbox aws sts get-caller-identity  # AWS CLI with default AWS integration
+  devbox pi -- --no-aws -s
+
+Filesystem boundary:
+  The target is writable by default. .git remains writable while .github,
+  .turbo, .cargo, and common lockfiles are read-only unless --allow-infra is
+  used. System paths and host paths outside explicit mounts remain read-only or
+  absent. Pi credentials and development state, OpenCode development state,
+  host-tool caches, AWS, clipboard, SSH, terminal, and optional GUI integrations
+  share one developer box. Other Pi configuration remains read-only by default.
+
+Security scope:
+  Defaults favor development convenience. Network, AWS credentials, and
+  clipboard access are available when detected. Any process in the box can
+  use those capabilities. SSH agent forwarding is opt-in via --ssh-agent or
+  DEVBOX_SSH_AGENT=1. Use --no-network, --no-aws, --no-clipboard,
+  --no-host-tools, and --ro to harden a run, or use --locked for the strict
+  read-only/offline/credential-free preset.
+
+Environment:
+  DEVBOX_ACTIVE             1 inside a running Devbox sandbox
+  DEVBOX_PROJECT_ROOT       Selected project root inside the sandbox
+  DEVBOX_AGENT_CONTEXT_FILE Read-only agent guidance inside the sandbox
+  DEVBOX_GIT_POLICY         "wrapped" when git uses the policy wrapper
+  DEVBOX_FS_MODE            "ro" or "rw" (default and effective mode)
+  DEVBOX_SHELL              Shell used when COMMAND is omitted (default: zsh)
+  DEVBOX_AWS                1/0 default for AWS integration
+  DEVBOX_CLIPBOARD          1/0 default for clipboard integration
+  DEVBOX_NETWORK            1/0 default for shared networking
+  DEVBOX_SSH_AGENT          1/0 opt-in for SSH-agent forwarding (default 0)
+  DEVBOX_TERMINAL_SOCKETS    1/0 default for Neovim/tmux socket forwarding
+  DEVBOX_HOST_TOOLS         1/0 default for host development tools
+  PI_CODING_AGENT_DIR       Optional Pi state root override
+  TMPDIR                    Owner-only per-run temp path; host-shared only for active Neovim handoff
+USAGE_EOF
+}
+
+version() {
+    printf '%s %s\n' "${PROGRAM_NAME}" "${PROGRAM_VERSION}"
+    printf 'Sandbox: Bubblewrap\n'
+}
+
+error() {
+    printf '%b%s: %s%b\n' "${RED}" "${PROGRAM_NAME}" "$*" "${NC}" >&2
+}
+
+warning() {
+    printf '%b%s: %s%b\n' "${YELLOW}" "${PROGRAM_NAME}" "$*" "${NC}" >&2
+}
+
+info() {
+    if [[ "${QUIET}" -eq 0 && "${VERBOSE}" -eq 1 ]]; then
+        printf '%b%s: %s%b\n' "${GREEN}" "${PROGRAM_NAME}" "$*" "${NC}" >&2
+    fi
+}
+
+startup_trace_ms() {
+    date +%s%3N 2>/dev/null || printf '%s000' "$(date +%s)"
+}
+
+trace_startup() {
+    [[ "${DEVBOX_TRACE_STARTUP:-0}" == "1" ]] || return 0
+
+    local label="$1"
+    local now
+    local delta
+    local total
+
+    now="$(startup_trace_ms)"
+    if [[ "${DEVBOX_TRACE_STARTUP_STARTED:-0}" -eq 0 ]]; then
+        DEVBOX_TRACE_STARTUP_STARTED="${now}"
+        DEVBOX_TRACE_STARTUP_LAST="${now}"
+    fi
+    delta=$((now - DEVBOX_TRACE_STARTUP_LAST))
+    total=$((now - DEVBOX_TRACE_STARTUP_STARTED))
+    DEVBOX_TRACE_STARTUP_LAST="${now}"
+    printf 'devbox startup: +%sms total=%sms %s\n' "${delta}" "${total}" "${label}" >&2
+}
+
+file_mtime() {
+    stat -c %Y "$1" 2>/dev/null || printf '0'
+}
+
+read_discovery_cache() {
+    local cache_key
+    local encoded_value
+    local decoded_value
+    local valid=1
+    local count=0
+    local -a cache_keys=()
+    local -a cache_encoded_values=()
+    local -A seen_keys=()
+
+    while IFS='=' read -r cache_key encoded_value; do
+        case "${cache_key}" in
+        DEVBOX_CACHE_SCRIPT_MTIME | DEVBOX_CACHE_BWRAP_PATH | DEVBOX_CACHE_BWRAP_VERSION | \
+            DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED | DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT | \
+            DEVBOX_CACHE_REAL_GIT_HOST | DEVBOX_CACHE_REAL_GIT_REALPATH | \
+            DEVBOX_CACHE_DEVBOX_GIT_HOST | DEVBOX_CACHE_DEVBOX_GIT_REALPATH) ;;
+        *) valid=0; continue ;;
+        esac
+        if [[ -n "${seen_keys[${cache_key}]:-}" ]]; then
+            valid=0
+            continue
+        fi
+        seen_keys["${cache_key}"]=1
+        cache_keys+=("${cache_key}")
+        cache_encoded_values+=("${encoded_value}")
+        count=$((count + 1))
+    done <"${DEVBOX_DISCOVERY_CACHE}"
+
+    [[ "${valid}" -eq 1 && "${count}" -eq 9 ]] || return 1
+
+    # One decode for the whole payload: an encoded newline (Cg==) separates
+    # values, so decoded values split cleanly on newlines. Values are
+    # newline-free by construction; a line-count mismatch means corruption
+    # or tampering and invalidates the cache. Assignment happens only after
+    # full validation, which is stricter than assigning while scanning.
+    local joined_encoded=""
+    local padded_value
+    local last_index=$(( ${#cache_keys[@]} - 1 ))
+    local index
+    for index in "${!cache_keys[@]}"; do
+        # read strips one trailing '=' from singly padded values; GNU base64
+        # only tolerates an unpadded tail at end-of-stream, so restore
+        # canonical padding before values are joined into one stream.
+        padded_value="${cache_encoded_values[index]}"
+        while (( ${#padded_value} % 4 != 0 )); do
+            padded_value+="="
+        done
+        joined_encoded+="${padded_value}"
+        [[ "${index}" -eq "${last_index}" ]] || joined_encoded+=$'\nCg==\n'
+    done
+    decoded_value="$(base64 --decode <<<"${joined_encoded}" 2>/dev/null)" || return 1
+    local -a cache_decoded_values=()
+    mapfile -t cache_decoded_values <<<"${decoded_value}"
+    [[ "${#cache_decoded_values[@]}" -eq "${#cache_keys[@]}" ]] || return 1
+    for index in "${!cache_keys[@]}"; do
+        printf -v "${cache_keys[index]}" '%s' "${cache_decoded_values[index]}"
+        DEVBOX_CACHE_READ_SNAPSHOT["${cache_keys[index]}"]="${cache_decoded_values[index]}"
+    done
+    return 0
+}
+
+write_discovery_cache_value() {
+    local cache_key="$1"
+    local cache_value="$2"
+
+    printf '%s=' "${cache_key}"
+    printf '%s' "${cache_value}" | base64 --wrap=0
+    printf '\n'
+}
+
+init_discovery_cache() {
+    DEVBOX_CACHE_DIR="${HOST_HOME}/.cache/devbox"
+    DEVBOX_DISCOVERY_CACHE="${DEVBOX_CACHE_DIR}/discovery-v2.cache"
+    DEVBOX_DISCOVERY_CACHE_VALID=0
+
+    [[ "${EPHEMERAL_STATE:-0}" -eq 0 ]] || return 0
+    mkdir -p -- "${DEVBOX_CACHE_DIR}"
+    chmod 700 "${DEVBOX_CACHE_DIR}"
+    command -v base64 >/dev/null 2>&1 || return 0
+    if [[ "${DEVBOX_FORCE_PROBE:-0}" == "1" || "${DEVBOX_FORCE_DISCOVERY:-0}" == "1" ]]; then
+        return 0
+    fi
+    if [[ -f "${DEVBOX_DISCOVERY_CACHE}" && ! -L "${DEVBOX_DISCOVERY_CACHE}" ]] &&
+        [[ "$(stat -c %u -- "${DEVBOX_DISCOVERY_CACHE}" 2>/dev/null || true)" == "${EUID}" ]] &&
+        [[ "$(stat -c %a -- "${DEVBOX_DISCOVERY_CACHE}" 2>/dev/null || true)" == 600 ]] &&
+        read_discovery_cache; then
+        DEVBOX_DISCOVERY_CACHE_VALID=1
+    fi
+}
+
+is_discovery_cache_current() {
+    local expected_bwrap_path="$1"
+    local expected_bwrap_version="$2"
+
+    [[ "${DEVBOX_DISCOVERY_CACHE_VALID:-0}" -eq 1 ]] || return 1
+    [[ "${DEVBOX_CACHE_SCRIPT_MTIME:-}" == "$(file_mtime "$0")" ]] || return 1
+    [[ "${DEVBOX_CACHE_BWRAP_PATH:-}" == "${expected_bwrap_path}" ]] || return 1
+    [[ "${DEVBOX_CACHE_BWRAP_VERSION:-}" == "${expected_bwrap_version}" ]] || return 1
+}
+
+discovery_cache_matches_read_snapshot() {
+    local cache_key
+
+    [[ "${DEVBOX_DISCOVERY_CACHE_VALID:-0}" -eq 1 ]] || return 1
+    for cache_key in DEVBOX_CACHE_SCRIPT_MTIME DEVBOX_CACHE_BWRAP_PATH DEVBOX_CACHE_BWRAP_VERSION \
+        DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT \
+        DEVBOX_CACHE_REAL_GIT_HOST DEVBOX_CACHE_REAL_GIT_REALPATH \
+        DEVBOX_CACHE_DEVBOX_GIT_HOST DEVBOX_CACHE_DEVBOX_GIT_REALPATH; do
+        [[ "${!cache_key}" == "${DEVBOX_CACHE_READ_SNAPSHOT[${cache_key}]:-}" ]] || return 1
+    done
+    [[ "${DEVBOX_CACHE_SCRIPT_MTIME}" == "$(file_mtime "$0")" ]]
+}
+
+write_discovery_cache() {
+    local temporary_cache
+
+    [[ -n "${DEVBOX_DISCOVERY_CACHE:-}" ]] || return 0
+    [[ "${EPHEMERAL_STATE:-0}" -eq 0 ]] || return 0
+    command -v base64 >/dev/null 2>&1 || return 0
+    if discovery_cache_matches_read_snapshot; then
+        return 0
+    fi
+    umask 077
+    temporary_cache="$(mktemp "${DEVBOX_DISCOVERY_CACHE}.tmp.XXXXXX")"
+    if ! {
+        write_discovery_cache_value DEVBOX_CACHE_SCRIPT_MTIME "$(file_mtime "$0")"
+        write_discovery_cache_value DEVBOX_CACHE_BWRAP_PATH "${DEVBOX_CACHE_BWRAP_PATH:-}"
+        write_discovery_cache_value DEVBOX_CACHE_BWRAP_VERSION "${DEVBOX_CACHE_BWRAP_VERSION:-}"
+        write_discovery_cache_value DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED "${DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED:-}"
+        write_discovery_cache_value DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT "${DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT:-}"
+        write_discovery_cache_value DEVBOX_CACHE_REAL_GIT_HOST "${DEVBOX_CACHE_REAL_GIT_HOST:-}"
+        write_discovery_cache_value DEVBOX_CACHE_REAL_GIT_REALPATH "${DEVBOX_CACHE_REAL_GIT_REALPATH:-}"
+        write_discovery_cache_value DEVBOX_CACHE_DEVBOX_GIT_HOST "${DEVBOX_CACHE_DEVBOX_GIT_HOST:-}"
+        write_discovery_cache_value DEVBOX_CACHE_DEVBOX_GIT_REALPATH "${DEVBOX_CACHE_DEVBOX_GIT_REALPATH:-}"
+    } >"${temporary_cache}"; then
+        rm -f -- "${temporary_cache}"
+        return 1
+    fi
+    chmod 600 "${temporary_cache}"
+    mv -f -- "${temporary_cache}" "${DEVBOX_DISCOVERY_CACHE}"
+}
+
+resolve_bind_source_path() {
+    local source_path="$1"
+    if [[ -L "${source_path}" ]]; then
+        REPLY="$(realpath "${source_path}")"
+        return
+    fi
+    REPLY="${source_path}"
+}
+
+is_path_within() {
+    local parent_path="$1"
+    local child_path="$2"
+    [[ "${child_path}" == "${parent_path}" || "${child_path}" == "${parent_path}"/* ]]
+}
+
+is_project_owned_path() {
+    local sand_p="$1"
+    [[ -n "${SANDBOX_PROJECT_ROOT:-}" && "${sand_p}" == "${SANDBOX_PROJECT_ROOT}" ]] && return 0
+    [[ -n "${PROJECT_ALIAS_DIR:-}" && "${sand_p}" == "${PROJECT_ALIAS_DIR}" ]] && return 0
+    return 1
+}
+
+add_extra_dir_once() {
+    local dir_path="$1"
+    [[ -n "${EXTRA_DIR_SET[${dir_path}]:-}" ]] && return 0
+    EXTRA_DIR_SET["${dir_path}"]=1
+    EXTRA_DIRS+=(--dir "${dir_path}")
+}
+
+add_parent_dirs_once() {
+    local dir_path="$1"
+    local parent=""
+    local segment
+
+    [[ -n "${PARENT_DIR_EXPANSION_SET[${dir_path}]:-}" ]] && return 0
+    PARENT_DIR_EXPANSION_SET["${dir_path}"]=1
+
+    IFS='/' read -r -a segments <<<"${dir_path}"
+    for segment in "${segments[@]}"; do
+        [[ -z "${segment}" ]] && continue
+        parent="${parent}/${segment}"
+        add_extra_dir_once "${parent}"
+    done
+}
+
+register_bind_destination() {
+    local bind_flag="$1"
+    local host_p="$2"
+    local sand_p="$3"
+    local policy="${bind_flag}|${host_p}"
+    local existing="${EXTRA_BIND_DEST_SET[${sand_p}]:-}"
+
+    if [[ -z "${existing}" ]]; then
+        EXTRA_BIND_DEST_SET["${sand_p}"]="${policy}"
+        return 0
+    fi
+    if [[ "${existing}" == "${policy}" ]]; then
+        return 1
+    fi
+    # One destination fed by one resolved source: the writable bind owns it.
+    # A read-only mount of the same source yields in either registration
+    # order — bwrap applies later mounts on top, so an explicit project bind
+    # shadows an earlier resource mount instead of aborting the launch.
+    if [[ "${existing}" == "--bind|${host_p}" && "${bind_flag}" == "--ro-bind" ]]; then
+        info "Read-only mount yields to writable bind at ${sand_p}"
+        return 1
+    fi
+    if [[ "${existing}" == "--ro-bind|${host_p}" && "${bind_flag}" == "--bind" ]]; then
+        EXTRA_BIND_DEST_SET["${sand_p}"]="${policy}"
+        info "Writable bind takes over read-only mount at ${sand_p}"
+        return 0
+    fi
+    error "conflicting mount policy for ${sand_p}: ${existing} versus ${policy}"
+    exit 1
+}
+
+add_extra_bind_once() {
+    local bind_flag="$1"
+    local host_p="$2"
+    local sand_p="$3"
+
+    register_bind_destination "${bind_flag}" "${host_p}" "${sand_p}" || return 0
+    EXTRA_BINDS+=("${bind_flag}" "${host_p}" "${sand_p}")
+}
+
+add_prepared_bind_once() {
+    local bind_flag="$1"
+    local host_p="$2"
+    local sand_p="$3"
+    local resolved_host_p
+
+    resolve_bind_source_path "${host_p}"
+    resolved_host_p="${REPLY}"
+    register_bind_destination "${bind_flag}" "${resolved_host_p}" "${sand_p}" || return 0
+    add_parent_dirs_once "${sand_p%/*}"
+    if [[ -d "${resolved_host_p}" ]]; then
+        EXTRA_BINDS+=(--dir "${sand_p}")
+    fi
+    EXTRA_BINDS+=("${bind_flag}" "${resolved_host_p}" "${sand_p}")
+}
+
+add_sandbox_env_once() {
+    local env_name="$1"
+    local env_value="$2"
+
+    [[ -n "${SANDBOX_ENV_SET[${env_name}]:-}" ]] && return 0
+    SANDBOX_ENV_SET["${env_name}"]=1
+    SANDBOX_ENVS+=(--setenv "${env_name}" "${env_value}")
+}
+
+map_host_path_to_sandbox() {
+    local host_path="$1"
+    if is_path_within "${HOST_HOME}" "${host_path}"; then
+        REPLY="${SANDBOX_HOME}${host_path#"${HOST_HOME}"}"
+        return
+    fi
+    REPLY="${host_path}"
+}
+
+bind_runtime_dir_precreated() {
+    local host_p="$1"
+    local sand_p="$2"
+    local resolved_host_p
+
+    resolve_bind_source_path "${host_p}"
+    resolved_host_p="${REPLY}"
+    add_parent_dirs_once "${sand_p%/*}"
+    add_extra_bind_once --bind "${resolved_host_p}" "${sand_p}"
+}
+
+bind_runtime_dir() {
+    local host_p="$1"
+    local sand_p="$2"
+
+    mkdir -p -- "${host_p}"
+    bind_runtime_dir_precreated "${host_p}" "${sand_p}"
+}
+
+bind_prepared_runtime_dir() {
+    local host_p="$1"
+    local sand_p="$2"
+
+    mkdir -p -- "${host_p}"
+    add_prepared_bind_once --bind "${host_p}" "${sand_p}"
+}
+
+bind_runtime_path_precreated() {
+    local host_p="$1"
+    local sand_p="$2"
+    local resolved_host_p
+
+    [[ -e "${host_p}" ]] || return 0
+    resolve_bind_source_path "${host_p}"
+    resolved_host_p="${REPLY}"
+    add_parent_dirs_once "${sand_p%/*}"
+    add_extra_bind_once --bind "${resolved_host_p}" "${sand_p}"
+}
+
+opt_ro_bind_path() {
+    local host_p="$1"
+    local sand_p="$2"
+    local resolved_host_p
+
+    [[ -e "${host_p}" ]] || return 0
+    resolve_bind_source_path "${host_p}"
+    resolved_host_p="${REPLY}"
+    add_parent_dirs_once "${sand_p%/*}"
+    add_extra_bind_once --ro-bind "${resolved_host_p}" "${sand_p}"
+}
+
+opt_ro_bind_dir() {
+    local host_p="$1"
+    local sand_p="$2"
+
+    [[ -d "${host_p}" ]] || return 0
+    opt_ro_bind_path "${host_p}" "${sand_p}"
+}
+
+bind_pi_xdg_resources() {
+    local host_config_pi="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}/pi"
+    local host_data_pi="${XDG_DATA_HOME:-${HOST_HOME}/.local/share}/pi"
+    local host_state_pi="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}/pi"
+    local host_state_ramona="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}/ramona"
+    local host_state_cockpit="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}/pi-vimux-starship"
+    local host_cache_pi="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}/pi"
+    local sand_config_pi="${SANDBOX_CONFIG_DIR}/pi"
+    local sand_data_pi="${SANDBOX_LOCAL_SHARE_DIR}/pi"
+    local sand_state_pi="${SANDBOX_LOCAL_STATE_DIR}/pi"
+    local sand_state_ramona="${SANDBOX_LOCAL_STATE_DIR}/ramona"
+    local sand_state_cockpit="${SANDBOX_LOCAL_STATE_DIR}/pi-vimux-starship"
+    local sand_cache_pi="${SANDBOX_CACHE_DIR}/pi"
+
+    add_sandbox_env_once XDG_CONFIG_HOME "${SANDBOX_CONFIG_DIR}"
+    add_sandbox_env_once XDG_DATA_HOME "${SANDBOX_LOCAL_SHARE_DIR}"
+    add_sandbox_env_once XDG_STATE_HOME "${SANDBOX_LOCAL_STATE_DIR}"
+    add_sandbox_env_once XDG_CACHE_HOME "${SANDBOX_CACHE_DIR}"
+
+    if [[ "${ALLOW_PI_CONFIG}" -eq 1 ]]; then
+        [[ -d "${host_config_pi}" ]] && bind_runtime_dir "${host_config_pi}" "${sand_config_pi}"
+        [[ -d "${host_data_pi}" ]] && bind_runtime_dir "${host_data_pi}" "${sand_data_pi}"
+    else
+        opt_ro_bind_dir "${host_config_pi}" "${sand_config_pi}"
+        opt_ro_bind_dir "${host_data_pi}" "${sand_data_pi}"
+    fi
+
+    if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
+        add_extra_dir_once "${sand_state_pi}"
+        add_extra_dir_once "${sand_state_ramona}"
+        add_extra_dir_once "${sand_state_cockpit}"
+        add_extra_dir_once "${sand_cache_pi}"
+    else
+        bind_runtime_dir "${host_state_pi}" "${sand_state_pi}"
+        mkdir -p -- "${host_state_ramona}"
+        chmod 0700 -- "${host_state_ramona}"
+        bind_runtime_dir_precreated "${host_state_ramona}" "${sand_state_ramona}"
+        # Cockpit agents telemetry: the host board and the sandbox sink must
+        # share one read-write state dir or sandboxed agents stay invisible.
+        mkdir -p -- "${host_state_cockpit}"
+        chmod 0700 -- "${host_state_cockpit}"
+        bind_runtime_dir_precreated "${host_state_cockpit}" "${sand_state_cockpit}"
+        bind_runtime_dir "${host_cache_pi}" "${sand_cache_pi}"
+    fi
+}
+
+bind_user_openspec_schemas() {
+    local host_schemas="${XDG_DATA_HOME:-${HOST_HOME}/.local/share}/openspec/schemas"
+    local sandbox_schemas="${SANDBOX_LOCAL_SHARE_DIR}/openspec/schemas"
+
+    [[ -d "${host_schemas}" ]] || return 0
+    add_prepared_bind_once --ro-bind "${host_schemas}" "${sandbox_schemas}"
+}
+
+is_pi_package_directory() {
+    local package_dir="$1"
+    local manifest_path="${package_dir}/package.json"
+
+    if [[ -d "${package_dir}/extensions" || -d "${package_dir}/skills" ||
+        -d "${package_dir}/prompts" || -d "${package_dir}/themes" ]]; then
+        return 0
+    fi
+    [[ -f "${manifest_path}" ]] || return 1
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -e '
+            .pi
+            | type == "object"
+                and (has("extensions") or has("skills") or has("prompts") or has("themes"))
+        ' "${manifest_path}" >/dev/null 2>&1
+        return
+    fi
+    python3 - "${manifest_path}" <<'PY' >/dev/null 2>&1
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as manifest_file:
+    manifest = json.load(manifest_file)
+pi_manifest = manifest.get("pi")
+raise SystemExit(0 if isinstance(pi_manifest, dict) and any(
+    key in pi_manifest for key in ("extensions", "skills", "prompts", "themes")
+) else 1)
+PY
+}
+
+bind_pi_absolute_local_packages() {
+    local settings_path="${PI_AGENT_DIR}/settings.json"
+    local package_sources=""
+    local package_source
+    local resolved_package_source
+    local protected_destination
+    local existing_package_mount
+    local bind_index
+    local bind_flag
+
+    [[ -f "${settings_path}" ]] || return 0
+    if command -v jq >/dev/null 2>&1; then
+        if ! package_sources="$(
+            jq -r '
+                (.packages // []) as $packages
+                | if ($packages | type) != "array" then
+                    error("Pi settings packages must be an array")
+                  else
+                    $packages[]
+                  end
+                | if type == "string" then .
+                  elif type == "object" then (.source // empty)
+                  else empty
+                  end
+                | select(type == "string" and startswith("/"))
+                | if test("[\\r\\n]") then error("local package paths cannot contain newlines")
+                  else .
+                  end
+            ' "${settings_path}"
+        )"; then
+            error "could not parse safe absolute local Pi packages from: ${settings_path}"
+            exit 1
+        fi
+    elif command -v python3 >/dev/null 2>&1; then
+        if ! package_sources="$(python3 - "${settings_path}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as settings_file:
+    settings = json.load(settings_file)
+packages = settings.get("packages") or []
+if not isinstance(packages, list):
+    raise ValueError("Pi settings packages must be an array")
+for entry in packages:
+    source = entry if isinstance(entry, str) else entry.get("source") if isinstance(entry, dict) else None
+    if isinstance(source, str) and source.startswith("/"):
+        if "\n" in source or "\r" in source:
+            raise ValueError("local package paths cannot contain newlines")
+        print(source)
+PY
+        )"; then
+            error "could not parse safe absolute local Pi packages from: ${settings_path}"
+            exit 1
+        fi
+    else
+        warning "cannot discover absolute local Pi packages without jq or python3; use --add for each package"
+        return 0
+    fi
+
+    while IFS= read -r package_source; do
+        [[ -n "${package_source}" ]] || continue
+        case "${package_source}" in
+        *//* | */./* | */. | */../* | */.. | */)
+            error "configured absolute local Pi package path is not canonical: ${package_source}"
+            exit 1
+            ;;
+        esac
+        if [[ ! -e "${package_source}" ]]; then
+            error "configured absolute local Pi package does not exist: ${package_source}"
+            exit 1
+        fi
+        if [[ ! -f "${package_source}" && ! -d "${package_source}" ]]; then
+            error "configured absolute local Pi package is not a file or directory: ${package_source}"
+            exit 1
+        fi
+
+        resolved_package_source="$(realpath -- "${package_source}")"
+        if [[ "${resolved_package_source}" != "${package_source}" ]]; then
+            error "configured absolute local Pi package path must resolve canonically: ${package_source}"
+            error "configure the resolved path or authorize the alias explicitly with --add"
+            exit 1
+        fi
+        existing_package_mount="${EXPLICIT_BIND_DEST_SET[${package_source}]:-}"
+        if [[ "${LOCKED_MODE}" -eq 1 && "${existing_package_mount}" == --bind ]]; then
+            error "configured absolute local Pi package cannot be writable in locked mode: ${package_source}"
+            exit 1
+        fi
+        if [[ -n "${existing_package_mount}" ]]; then
+            info "Pi integration: absolute local package already has an explicit mount (${package_source})"
+            continue
+        fi
+        if [[ "${ALLOW_PI_CONFIG}" -eq 1 ]] &&
+            is_path_within "${PI_AGENT_DIR_REAL}" "${resolved_package_source}"; then
+            info "Pi integration: absolute local package is already writable inside the authorized Pi configuration (${package_source})"
+            continue
+        fi
+        if is_path_within "${PROJECT_SOURCE_DIR}" "${resolved_package_source}"; then
+            info "Pi integration: absolute local package is already inside the selected project (${package_source})"
+            continue
+        fi
+        if ! is_path_within "${HOST_HOME}" "${resolved_package_source}" ||
+            [[ "${resolved_package_source}" == "${HOST_HOME}" ]]; then
+            error "configured absolute local Pi package is outside the safe home scope: ${package_source}"
+            error "authorize it explicitly with --add"
+            exit 1
+        fi
+        if [[ -f "${resolved_package_source}" ]]; then
+            case "${resolved_package_source}" in
+            *.ts | *.js) ;;
+            *)
+                error "configured absolute local Pi package file is not a TypeScript or JavaScript extension: ${package_source}"
+                exit 1
+                ;;
+            esac
+        elif ! is_pi_package_directory "${resolved_package_source}"; then
+            error "configured absolute local Pi package directory has no package manifest or conventional resources: ${package_source}"
+            exit 1
+        fi
+
+        if is_path_within "${resolved_package_source}" "${PROJECT_SOURCE_DIR}"; then
+            error "configured absolute local Pi package contains the selected project: ${package_source}"
+            error "select the package itself as the target or authorize it explicitly with --add"
+            exit 1
+        fi
+        for protected_destination in "${!EXTRA_BIND_DEST_SET[@]}"; do
+            if is_path_within "${resolved_package_source}" "${protected_destination}"; then
+                error "configured absolute local Pi package contains a protected mount: ${package_source}"
+                error "authorize the exact package explicitly with --add"
+                exit 1
+            fi
+        done
+        for ((bind_index = 0; bind_index < ${#EXTRA_BINDS[@]}; bind_index++)); do
+            bind_flag="${EXTRA_BINDS[bind_index]}"
+            case "${bind_flag}" in
+            --bind | --ro-bind)
+                protected_destination="${EXTRA_BINDS[bind_index + 2]:-}"
+                if is_path_within "${resolved_package_source}" "${protected_destination}"; then
+                    error "configured absolute local Pi package contains a protected mount: ${package_source}"
+                    error "authorize the exact package explicitly with --add"
+                    exit 1
+                fi
+                bind_index=$((bind_index + 2))
+                ;;
+            esac
+        done
+        for ((bind_index = 0; bind_index < ${#SAFE_BINDS[@]}; bind_index++)); do
+            bind_flag="${SAFE_BINDS[bind_index]}"
+            case "${bind_flag}" in
+            --bind | --ro-bind)
+                protected_destination="${SAFE_BINDS[bind_index + 2]:-}"
+                if is_path_within "${resolved_package_source}" "${protected_destination}"; then
+                    error "configured absolute local Pi package contains a protected mount: ${package_source}"
+                    error "authorize the exact package explicitly with --add"
+                    exit 1
+                fi
+                bind_index=$((bind_index + 2))
+                ;;
+            esac
+        done
+
+        add_pi_prepared_bind_once --ro-bind "${package_source}" "${package_source}"
+        info "Pi integration: mounted absolute local package read-only (${package_source})"
+    done <<<"${package_sources}"
+}
+
+add_pi_prepared_bind_once() {
+    local bind_flag="$1"
+    local host_p="$2"
+    local sand_p="$3"
+    local resolved_host_p
+
+    resolve_bind_source_path "${host_p}"
+    resolved_host_p="${REPLY}"
+    register_bind_destination "${bind_flag}" "${resolved_host_p}" "${sand_p}" || return 0
+    add_parent_dirs_once "${sand_p%/*}"
+    [[ -d "${resolved_host_p}" ]] && PI_BINDS+=(--dir "${sand_p}")
+    PI_BINDS+=("${bind_flag}" "${resolved_host_p}" "${sand_p}")
+}
+
+bind_pi_agent_entry() {
+    local bind_flag="$1"
+    local resource_path="$2"
+    local host_p="${PI_AGENT_DIR}/${resource_path}"
+    local sand_p="${SANDBOX_PI_AGENT_ASSEMBLY_DIR}/${resource_path}"
+    local resolved_host_p
+    local resolved_sand_p
+
+    [[ -e "${host_p}" ]] || return 0
+    # realpath must resolve the complete chain, not only a symlink at the leaf:
+    # a whole-directory ~/.pi/agent symlink makes every child look non-symlinked
+    # to [[ -L ]], even though its parent still redirects the source.
+    resolved_host_p="$(realpath "${host_p}")"
+    add_pi_prepared_bind_once "${bind_flag}" "${resolved_host_p}" "${sand_p}"
+
+    # Preserve absolute symlink destinations too. Local packages may resolve
+    # dependencies relative to their physical Galactica or pnpm-backed source,
+    # even though Pi itself is pinned to the logical ~/.pi/agent path.
+    map_host_path_to_sandbox "${resolved_host_p}"
+    resolved_sand_p="${REPLY}"
+    if [[ "${resolved_sand_p}" != "${sand_p}" ]]; then
+        add_pi_prepared_bind_once "${bind_flag}" "${resolved_host_p}" "${resolved_sand_p}"
+    fi
+}
+
+bind_pi_agent_entry_target_only() {
+    local bind_flag="$1"
+    local resource_path="$2"
+    local host_p="${PI_AGENT_DIR}/${resource_path}"
+    local resolved_host_p
+    local resolved_sand_p
+
+    [[ -e "${host_p}" ]] || return 0
+    resolved_host_p="$(realpath "${host_p}")"
+    [[ "${resolved_host_p}" != "${host_p}" ]] || return 0
+    map_host_path_to_sandbox "${resolved_host_p}"
+    resolved_sand_p="${REPLY}"
+    add_pi_prepared_bind_once "${bind_flag}" "${resolved_host_p}" "${resolved_sand_p}"
+}
+
+validate_pi_state_directory_leaf() {
+    local root="$1"
+    local resource_path="$2"
+    local candidate="${root}/${resource_path}"
+
+    if [[ -L "${candidate}" ]]; then
+        error "refusing symlinked writable Pi state: ${candidate}"
+        error "replace it with a machine-local directory; Devbox will not follow or migrate it"
+        return 1
+    fi
+    if [[ -e "${candidate}" && ! -d "${candidate}" ]]; then
+        error "writable Pi state is not a directory: ${candidate}"
+        return 1
+    fi
+}
+
+validate_pi_trust_file() {
+    local root="$1"
+    local candidate="${root}/trust.json"
+
+    if [[ -L "${candidate}" ]]; then
+        error "refusing symlinked Pi trust file: ${candidate}"
+        error "replace it with a machine-local regular file; Devbox will not follow or migrate it"
+        return 1
+    fi
+    if [[ -e "${candidate}" && ! -f "${candidate}" ]]; then
+        error "Pi trust file is not a regular file: ${candidate}"
+        return 1
+    fi
+}
+
+validate_independent_pi_state_root() {
+    local cursor="${HOST_HOME}"
+    local segment
+
+    for segment in .local state devbox pi-agent; do
+        cursor="${cursor}/${segment}"
+        if [[ -L "${cursor}" ]]; then
+            error "refusing symlinked machine-local Pi state path: ${cursor}"
+            return 1
+        fi
+        if [[ -e "${cursor}" && ! -d "${cursor}" ]]; then
+            error "machine-local Pi state path is not a directory: ${cursor}"
+            return 1
+        fi
+    done
+}
+
+seed_independent_pi_git_cache() {
+    local portable_git="${PI_AGENT_DIR}/git"
+    local machine_git="${PI_AGENT_STATE_SOURCE_ROOT}/git"
+    local seed_marker="${PI_AGENT_STATE_SOURCE_ROOT}/.portable-git-seeded-v1"
+    local portable_git_real
+    local marker_tmp
+
+    [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 ]] || return 0
+    [[ -f "${seed_marker}" ]] && return 0
+    [[ -d "${portable_git}" ]] || return 0
+
+    portable_git_real="$(realpath "${portable_git}")"
+    [[ "${portable_git_real}" != "${machine_git}" ]] || return 0
+    [[ -n "$(find "${portable_git_real}" -mindepth 1 -print -quit 2>/dev/null)" ]] || return 0
+
+    # Merge only missing cache entries. A failed earlier clone may already have
+    # created parent directories, while valid machine-local entries must never
+    # be replaced by older portable bytes.
+    if ! cp -a --no-clobber --reflink=auto -- "${portable_git_real}/." "${machine_git}/"; then
+        error "failed to seed machine-local Pi Git cache from read-only portable state"
+        return 1
+    fi
+    marker_tmp="${seed_marker}.$$"
+    if ! (umask 077 && printf 'seeded\n' >"${marker_tmp}" && mv -- "${marker_tmp}" "${seed_marker}"); then
+        rm -f -- "${marker_tmp}"
+        error "failed to record machine-local Pi Git cache seed"
+        return 1
+    fi
+}
+
+prepare_pi_writable_state() {
+    local resource_path
+    local resource_source
+    local default_agent_dir="${HOST_HOME}/.pi/agent"
+    local portable_state_symlink=0
+
+    # A real default agent root normally owns its state directly. If any
+    # non-trust writable leaf is already symlink-managed, treat the collection
+    # as portable and isolate managed state rather than following those links.
+    # A regular local sessions leaf is selected separately below for host parity.
+    if [[ "${PI_AGENT_DIR}" == "${default_agent_dir}" && "${PI_AGENT_DIR_REAL}" == "${default_agent_dir}" ]]; then
+        for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
+            [[ "${resource_path}" == trust ]] && continue
+            if [[ -L "${PI_AGENT_DIR}/${resource_path}" ]]; then
+                portable_state_symlink=1
+                break
+            fi
+        done
+    else
+        portable_state_symlink=1
+    fi
+
+    if [[ "${portable_state_symlink}" -eq 0 ]]; then
+        PI_AGENT_STATE_SOURCE_ROOT="${PI_AGENT_DIR}"
+        PI_AGENT_STATE_IS_INDEPENDENT=0
+    else
+        PI_AGENT_STATE_SOURCE_ROOT="${HOST_HOME}/.local/state/devbox/pi-agent"
+        PI_AGENT_STATE_IS_INDEPENDENT=1
+    fi
+
+    PI_AGENT_SESSION_SOURCE_DIR="${PI_AGENT_STATE_SOURCE_ROOT}/sessions"
+    # A real default agent root already gives host Pi a machine-local session
+    # directory. Keep that one leaf shared even when other managed state leaves
+    # require an independent Devbox state root, so Pi session IDs work on both
+    # sides of the sandbox boundary. Whole-agent and session-leaf symlinks stay
+    # isolated and are never followed writable.
+    if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 && \
+        "${PI_AGENT_DIR}" == "${default_agent_dir}" && \
+        "${PI_AGENT_DIR_REAL}" == "${default_agent_dir}" && \
+        ! -L "${PI_AGENT_DIR}/sessions" ]]; then
+        validate_pi_state_directory_leaf "${PI_AGENT_DIR}" sessions || exit 1
+        PI_AGENT_SESSION_SOURCE_DIR="${PI_AGENT_DIR}/sessions"
+    fi
+
+    # Validate every writable source before creating or changing state. Leaves
+    # under a portable whole-agent root are hidden by the assembled tmpfs and
+    # are not sources in normal mode, so they may remain untouched. A writable
+    # full-root bind must still reject them because mount destinations could
+    # otherwise follow those symlinks under --allow-pi-config.
+    if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 0 || "${ALLOW_PI_CONFIG}" -eq 1 ]]; then
+        for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
+            validate_pi_state_directory_leaf "${PI_AGENT_DIR}" "${resource_path}" || exit 1
+        done
+        validate_pi_trust_file "${PI_AGENT_DIR}" || exit 1
+    fi
+
+    if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 ]]; then
+        validate_independent_pi_state_root || exit 1
+        if [[ -e "${PI_AGENT_STATE_SOURCE_ROOT}" ]]; then
+            for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
+                if [[ "${resource_path}" == sessions && \
+                    "${PI_AGENT_SESSION_SOURCE_DIR}" != "${PI_AGENT_STATE_SOURCE_ROOT}/sessions" ]]; then
+                    continue
+                fi
+                validate_pi_state_directory_leaf "${PI_AGENT_STATE_SOURCE_ROOT}" "${resource_path}" || exit 1
+            done
+            validate_pi_trust_file "${PI_AGENT_STATE_SOURCE_ROOT}" || exit 1
+        fi
+    fi
+
+    # Locked mode validates the same boundaries but keeps all writable state
+    # ephemeral and must not create or chmod persistent host state.
+    if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
+        return 0
+    fi
+
+    # Mutation begins only after all portable and selected source leaves have
+    # passed validation. Permissions are security metadata; trust contents are
+    # never created, copied, or rewritten here.
+    (
+        umask 077
+        mkdir -p -- "${PI_AGENT_STATE_SOURCE_ROOT}"
+        for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
+            resource_source="${PI_AGENT_STATE_SOURCE_ROOT}/${resource_path}"
+            if [[ "${resource_path}" == sessions ]]; then
+                resource_source="${PI_AGENT_SESSION_SOURCE_DIR}"
+            fi
+            mkdir -p -- "${resource_source}"
+        done
+    )
+    seed_independent_pi_git_cache || exit 1
+    if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 ]]; then
+        chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}"
+    fi
+    chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust"
+    if [[ -f "${PI_AGENT_STATE_SOURCE_ROOT}/trust.json" ]]; then
+        chmod 0600 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust.json"
+    fi
+    # A portable trust file is deliberately ignored when state is independent.
+}
+
+bind_pi_writable_state() {
+    local resource_path
+    local resource_source
+    local trust_source="${PI_AGENT_STATE_SOURCE_ROOT}/trust.json"
+    local trust_destination="${SANDBOX_PI_AGENT_ASSEMBLY_DIR}/trust.json"
+    local state_mirror="${DEVBOX_INTERNAL_TMPDIR}/pi-agent-state"
+
+    for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
+        resource_source="${PI_AGENT_STATE_SOURCE_ROOT}/${resource_path}"
+        if [[ "${resource_path}" == sessions ]]; then
+            resource_source="${PI_AGENT_SESSION_SOURCE_DIR}"
+        fi
+        add_pi_prepared_bind_once --bind \
+            "${resource_source}" \
+            "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}/${resource_path}"
+    done
+
+    if [[ -f "${trust_source}" ]]; then
+        add_pi_prepared_bind_once --bind "${trust_source}" "${trust_destination}"
+    elif [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 && "${ALLOW_PI_CONFIG}" -eq 0 ]]; then
+        # Preserve optional trust-file creation without manufacturing trust
+        # contents: a private mirror lets a new file land in machine-local
+        # state while the logical Pi root remains an assembled tmpfs.
+        PI_BINDS+=(
+            --dir "${state_mirror}"
+            --bind "${PI_AGENT_STATE_SOURCE_ROOT}" "${state_mirror}"
+            --symlink "${state_mirror}/trust.json" "${trust_destination}"
+        )
+    elif [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 ]]; then
+        # The writable portable root may contain trust.json. Hide it under
+        # --allow-pi-config when no machine-local file exists; never expose,
+        # copy, or replace portable trust automatically.
+        add_pi_prepared_bind_once --ro-bind /dev/null "${trust_destination}"
+    fi
+}
+
+assemble_pi_agent_resource_closure() {
+    local resource_path
+
+    prepare_pi_writable_state
+
+    # Keep the logical ~/.pi path (and a whole-agent symlink, when present)
+    # visible. The effective agent tree itself is assembled at the resolved
+    # destination so realpath(PI_CODING_AGENT_DIR) and symlink traversal agree.
+    if [[ "${ALLOW_PI_CONFIG}" -eq 1 ]]; then
+        add_pi_prepared_bind_once --bind "${HOST_HOME}/.pi" "${SANDBOX_HOME}/.pi"
+        add_pi_prepared_bind_once --bind "${PI_AGENT_DIR_REAL}" "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}"
+        # The writable root already exposes regular children. Mount only the
+        # physical targets of symlinked resources; mounting onto the logical
+        # symlink leaf itself can fail before its absolute target is present.
+        for resource_path in "${PI_AGENT_RO_PATHS[@]}" "${PI_AGENT_ROOT_CONFIG_FILES[@]}"; do
+            bind_pi_agent_entry_target_only --bind "${resource_path}"
+        done
+    else
+        opt_ro_bind_dir "${HOST_HOME}/.pi" "${SANDBOX_HOME}/.pi"
+    add_parent_dirs_once "${SANDBOX_PI_AGENT_ASSEMBLY_DIR%/*}"
+        add_extra_dir_once "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}"
+        PI_BINDS+=(--tmpfs "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}")
+    fi
+
+    if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
+        for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
+            PI_BINDS+=(--dir "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}/${resource_path}")
+        done
+    else
+        bind_pi_writable_state
+    fi
+
+    if [[ "${ALLOW_PI_CONFIG}" -eq 0 ]]; then
+        for resource_path in "${PI_AGENT_RO_PATHS[@]}"; do
+            bind_pi_agent_entry --ro-bind "${resource_path}"
+        done
+        for resource_path in "${PI_AGENT_ROOT_CONFIG_FILES[@]}"; do
+            bind_pi_agent_entry --ro-bind "${resource_path}"
+        done
+        # Credentials are mutable runtime state: Pi refreshes OAuth tokens in place.
+        # Exact file binds preserve existing credentials without granting writes
+        # to settings, packages, trust, or the rest of the portable Pi root.
+        if [[ "${EPHEMERAL_STATE}" -eq 0 ]]; then
+            for resource_path in "${PI_AGENT_CREDENTIAL_FILES[@]}"; do
+                bind_pi_agent_entry --bind "${resource_path}"
+            done
+        fi
+    fi
+}
+
+bind_nearest_project_openspec() {
+    local logical_search_dir
+    local resolved_logical_search_dir
+    local resolved_source_search_dir
+    local openspec_dir
+    local logical_openspec_dir
+    local source_openspec_dir
+
+    if [[ "${TARGET_KIND}" == "dir" ]]; then
+        logical_search_dir="${TARGET_PATH}"
+    else
+        logical_search_dir="${TARGET_PARENT_DIR}"
+    fi
+
+    while [[ -n "${logical_search_dir}" && "${logical_search_dir}" != "/" ]]; do
+        openspec_dir="${logical_search_dir}/openspec"
+        if is_project_openspec_dir "${openspec_dir}"; then
+            resolve_project_openspec_source "${openspec_dir}"
+            source_openspec_dir="${REPLY}"
+            # If OpenSpec is inside the primary project bind, normal protected
+            # control-dir overlays handle it. Nested targets need the nearest
+            # sibling/ancestor OpenSpec tree exposed explicitly for Pi footer
+            # parity, without exposing the rest of that parent directory.
+            if [[ "${logical_search_dir}" != "${PROJECT_DIR}" ]]; then
+                add_prepared_bind_once --ro-bind "${source_openspec_dir}" "${openspec_dir}"
+                info "OpenSpec footer: mounted nearest project-local openspec/ read-only"
+            fi
+            if [[ "${source_openspec_dir}" != "${openspec_dir}" ]]; then
+                add_prepared_bind_once --ro-bind "${source_openspec_dir}" "${source_openspec_dir}"
+                info "OpenSpec footer: mounted resolved project-local openspec/ read-only"
+            fi
+            return 0
+        fi
+        logical_search_dir="$(dirname "${logical_search_dir}")"
+    done
+
+    if [[ "${TARGET_SOURCE_PATH}" == "${TARGET_PATH}" ]]; then
+        return 0
+    fi
+
+    if [[ "${TARGET_KIND}" == "dir" ]]; then
+        resolved_logical_search_dir="${TARGET_PATH}"
+        resolved_source_search_dir="${TARGET_SOURCE_PATH}"
+    else
+        resolved_logical_search_dir="${TARGET_PARENT_DIR}"
+        resolved_source_search_dir="${TARGET_SOURCE_PARENT_DIR}"
+    fi
+
+    while [[ -n "${resolved_source_search_dir}" && "${resolved_source_search_dir}" != "/" && \
+        -n "${resolved_logical_search_dir}" && "${resolved_logical_search_dir}" != "/" ]]; do
+        source_openspec_dir="${resolved_source_search_dir}/openspec"
+        logical_openspec_dir="${resolved_logical_search_dir}/openspec"
+        if is_project_openspec_dir "${source_openspec_dir}"; then
+            add_prepared_bind_once --ro-bind "${source_openspec_dir}" "${logical_openspec_dir}"
+            if [[ "${source_openspec_dir}" != "${logical_openspec_dir}" ]]; then
+                add_prepared_bind_once --ro-bind "${source_openspec_dir}" "${source_openspec_dir}"
+            fi
+            info "OpenSpec footer: mounted resolved nearest project-local openspec/ read-only"
+            return 0
+        fi
+        resolved_source_search_dir="$(dirname "${resolved_source_search_dir}")"
+        resolved_logical_search_dir="$(dirname "${resolved_logical_search_dir}")"
+    done
+}
+
+is_project_openspec_dir() {
+    local openspec_dir="$1"
+
+    [[ -d "${openspec_dir}" ]] || return 1
+    [[ -d "${openspec_dir}/changes" || -d "${openspec_dir}/specs" ]]
+}
+
+resolve_project_openspec_source() {
+    local openspec_dir="$1"
+    local child
+    local resolved_child
+    local candidate
+
+    for child in changes specs; do
+        if [[ -L "${openspec_dir}/${child}" ]]; then
+            resolved_child="$(realpath "${openspec_dir}/${child}" 2>/dev/null || true)"
+            [[ -n "${resolved_child}" ]] || continue
+            candidate="$(dirname "${resolved_child}")"
+            if is_project_openspec_dir "${candidate}"; then
+                REPLY="${candidate}"
+                return 0
+            fi
+        fi
+    done
+
+    REPLY="${openspec_dir}"
+}
+
+is_safe_pi_socket_env_name() {
+    local env_name="$1"
+
+    case "${env_name}" in
+    PI_*SOCKET*) ;;
+    *) return 1 ;;
+    esac
+    case "${env_name}" in
+    *AUTH* | *TOKEN* | *SECRET* | *CREDENTIAL* | *PASSWORD* | *KEY* | *SSH* | *GPG*) return 1 ;;
+    esac
+    case "${env_name}" in
+    *STATUS* | *TASK* | *TODO* | *PLAN* | *JOB* | *RUN* | *UI* | *FOOTER*) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+is_safe_pi_socket_path() {
+    local host_p="$1"
+    local runtime_root="${XDG_RUNTIME_DIR:-}"
+
+    [[ "${host_p}" == /* ]] || return 1
+    [[ -S "${host_p}" ]] || return 1
+    if [[ -n "${runtime_root}" && "${runtime_root}" == /* ]] && is_path_within "${runtime_root}" "${host_p}"; then
+        return 0
+    fi
+    is_path_within /tmp "${host_p}"
+}
+
+bind_pi_socket_envs() {
+    local env_name
+    local env_output
+    local host_p
+    local sand_p
+
+    env_output="$(compgen -e || true)"
+    while IFS= read -r env_name; do
+        [[ -n "${env_name}" ]] || continue
+        # Cheap glob pre-filter mirrors the first case in the safety check.
+        [[ "${env_name}" == PI_*SOCKET* ]] || continue
+        is_safe_pi_socket_env_name "${env_name}" || continue
+        host_p="${!env_name:-}"
+        is_safe_pi_socket_path "${host_p}" || continue
+        map_host_path_to_sandbox "${host_p}"
+        sand_p="${REPLY}"
+        bind_runtime_dir_precreated "${host_p}" "${sand_p}"
+        add_sandbox_env_once "${env_name}" "${sand_p}"
+        info "Pi integration: mounted exact ${env_name} socket"
+    done <<<"${env_output}"
+}
+
+derive_pnpm_home_from_pi_shim() {
+    local pi_bin_real="$1"
+    local bin_dir
+    local candidate
+    local marker
+    local shim_target
+    local shim_target_real
+
+    [[ -f "${pi_bin_real}" && -r "${pi_bin_real}" ]] || return 1
+    bin_dir="$(dirname -- "${pi_bin_real}")"
+    [[ "$(basename -- "${bin_dir}")" == "bin" ]] || return 1
+    candidate="$(dirname -- "${bin_dir}")"
+    [[ "$(basename -- "${candidate}")" == "pnpm" ]] || return 1
+    [[ "$(realpath "${candidate}" 2>/dev/null || true)" == "${candidate}" ]] || return 1
+    [[ -d "${candidate}/global" && -d "${candidate}/store" ]] || return 1
+
+    marker="$(tail -n 1 -- "${pi_bin_real}" 2>/dev/null || true)"
+    case "${marker}" in
+    '# cmd-shim-target='*) shim_target="${marker#\# cmd-shim-target=}" ;;
+    *) return 1 ;;
+    esac
+    [[ "${shim_target}" == /* ]] || return 1
+    case "${shim_target}" in
+    *//* | */./* | */. | */../* | */.. | */) return 1 ;;
+    esac
+    [[ -f "${shim_target}" && -r "${shim_target}" ]] || return 1
+    is_path_within "${candidate}/global" "${shim_target}" || return 1
+    shim_target_real="$(realpath "${shim_target}" 2>/dev/null || true)"
+    [[ -n "${shim_target_real}" ]] || return 1
+    is_path_within "${candidate}/store" "${shim_target_real}" || return 1
+
+    printf '%s\n' "${candidate}"
+}
+
+bind_pi_binary_package_tree() {
+    local pi_bin_real="$1"
+    local candidate
+    local resolved_candidate
+    local sand_candidate
+    local derived_candidate
+    local -a pnpm_home_candidates=()
+
+    if [[ -n "${PNPM_HOME:-}" && "${PNPM_HOME}" == /* ]]; then
+        pnpm_home_candidates+=("${PNPM_HOME}")
+    fi
+    if [[ -n "${XDG_DATA_HOME:-}" && "${XDG_DATA_HOME}" == /* ]]; then
+        pnpm_home_candidates+=("${XDG_DATA_HOME}/pnpm")
+    fi
+    pnpm_home_candidates+=("${HOST_HOME}/.local/share/pnpm")
+
+    for candidate in "${pnpm_home_candidates[@]}"; do
+        [[ -d "${candidate}" ]] || continue
+        resolved_candidate="$(realpath "${candidate}" 2>/dev/null || true)"
+        [[ -n "${resolved_candidate}" ]] || continue
+        is_path_within "${resolved_candidate}" "${pi_bin_real}" || continue
+
+        sand_candidate="${candidate}"
+        if [[ "${ALLOW_HOST_TOOLS}" -eq 1 ]]; then
+            info "Pi integration: pnpm package tree will use the shared writable development store"
+            return 0
+        fi
+        opt_ro_bind_dir "${candidate}" "${sand_candidate}"
+        info "Pi integration: mounted pnpm package tree read-only because host tools are disabled"
+        return 0
+    done
+
+    if derived_candidate="$(derive_pnpm_home_from_pi_shim "${pi_bin_real}")"; then
+        opt_ro_bind_dir "${derived_candidate}" "${derived_candidate}"
+        info "Pi integration: mounted the selected pnpm Pi package tree read-only"
+        return 0
+    fi
+
+    return 1
+}
+
+add_custom_bind() {
+    local bind_flag="$1"
+    local requested_path="$2"
+    local resolved_path
+
+    if [[ ! -e "${requested_path}" ]]; then
+        error "added path does not exist: ${requested_path}"
+        exit 1
+    fi
+    resolved_path="$(realpath "${requested_path}")"
+    add_prepared_bind_once "${bind_flag}" "${resolved_path}" "${resolved_path}"
+    EXPLICIT_BIND_DEST_SET["${resolved_path}"]="${bind_flag}"
+}
+
+cleanup_file_mode_tmp_dir() {
+    if [[ -n "${FILE_MODE_TMP_DIR:-}" && -d "${FILE_MODE_TMP_DIR}" ]]; then
+        rm -rf -- "${FILE_MODE_TMP_DIR}"
+    fi
+}
+
+prepare_single_file_overlay() {
+    local entry
+    local target_name
+    local target_parent_container
+    local had_dotglob=0
+    local had_nullglob=0
+
+    target_name="$(basename "${TARGET_SOURCE_PATH}")"
+    FILE_MODE_TMP_DIR="$(mktemp -d /tmp/devbox-filemode-XXXXXX)"
+    FILE_MODE_PARENT_DIR="${FILE_MODE_TMP_DIR}/parent"
+    FILE_MODE_TARGET_PATH="${FILE_MODE_PARENT_DIR}/${target_name}"
+    FILE_MODE_RO_SOURCE_SANDBOX_PATH="/tmp/.devbox-ro-parent-$$"
+
+    mkdir -p -- "${FILE_MODE_PARENT_DIR}"
+    cp -p -- "${TARGET_SOURCE_PATH}" "${FILE_MODE_TARGET_PATH}"
+
+    shopt -q dotglob && had_dotglob=1
+    shopt -q nullglob && had_nullglob=1
+    shopt -s dotglob nullglob
+    for entry in "${PROJECT_SOURCE_DIR}"/*; do
+        [[ "$(basename "${entry}")" == "${target_name}" ]] && continue
+        ln -s "${FILE_MODE_RO_SOURCE_SANDBOX_PATH}/$(basename "${entry}")" \
+            "${FILE_MODE_PARENT_DIR}/$(basename "${entry}")"
+    done
+    ((had_dotglob)) || shopt -u dotglob
+    ((had_nullglob)) || shopt -u nullglob
+
+    FILE_MODE_BINDS=(--ro-bind "${PROJECT_SOURCE_DIR}" "${FILE_MODE_RO_SOURCE_SANDBOX_PATH}")
+    target_parent_container="$(dirname "${SANDBOX_PROJECT_ROOT}")"
+    if [[ "${target_parent_container}" != "/" ]]; then
+        FILE_MODE_BINDS+=(--ro-bind "${target_parent_container}" "${target_parent_container}")
+    fi
+    FILE_MODE_BINDS+=(--bind "${FILE_MODE_PARENT_DIR}" "${SANDBOX_PROJECT_ROOT}")
+}
+
+sync_single_file_target_back() {
+    local temporary_target="${TARGET_SOURCE_PATH}.devbox-tmp.$$"
+
+    if [[ ! -f "${FILE_MODE_TARGET_PATH}" ]]; then
+        error "single-file target disappeared during sandbox session: ${TARGET_SOURCE_PATH}"
+        return 1
+    fi
+    if ! cp -p -- "${FILE_MODE_TARGET_PATH}" "${temporary_target}"; then
+        rm -f -- "${temporary_target}"
+        return 1
+    fi
+    if ! mv -f -- "${temporary_target}" "${TARGET_SOURCE_PATH}"; then
+        rm -f -- "${temporary_target}"
+        return 1
+    fi
+}
+
+resolve_target_mode() {
+    local requested_target="$1"
+    local logical_target
+    local resolved_target
+
+    if [[ ! -e "${requested_target}" ]]; then
+        error "target path does not exist: ${requested_target}"
+        exit 1
+    fi
+
+    if [[ "${requested_target}" == /* ]]; then
+        logical_target="${requested_target}"
+    else
+        logical_target="${PWD}/${requested_target}"
+    fi
+    resolved_target="$(realpath "${requested_target}")"
+    if [[ -d "${resolved_target}" ]]; then
+        TARGET_KIND="dir"
+        TARGET_PATH="${logical_target}"
+        TARGET_SOURCE_PATH="${resolved_target}"
+        TARGET_PARENT_DIR="$(dirname "${logical_target}")"
+        TARGET_SOURCE_PARENT_DIR="$(dirname "${resolved_target}")"
+        return
+    fi
+    if [[ -f "${resolved_target}" ]]; then
+        TARGET_KIND="file"
+        TARGET_PATH="${logical_target}"
+        TARGET_SOURCE_PATH="${resolved_target}"
+        TARGET_PARENT_DIR="$(dirname "${logical_target}")"
+        TARGET_SOURCE_PARENT_DIR="$(dirname "${resolved_target}")"
+        return
+    fi
+
+    error "target must be a directory or regular file: ${requested_target}"
+    exit 1
+}
+
+find_cargo_workspace_root() {
+    local start_dir="$1"
+    local manifest_path="${start_dir}/Cargo.toml"
+    local workspace_manifest=""
+    local current_dir
+
+    [[ -f "${manifest_path}" ]] || return 1
+    if command -v cargo >/dev/null 2>&1; then
+        workspace_manifest="$(cargo locate-project --workspace --manifest-path "${manifest_path}" --message-format plain 2>/dev/null || true)"
+        if [[ -n "${workspace_manifest}" && -f "${workspace_manifest}" ]]; then
+            dirname "$(realpath "${workspace_manifest}")"
+            return 0
+        fi
+    fi
+
+    current_dir="${start_dir}"
+    while [[ "${current_dir}" != "/" ]]; do
+        if [[ -f "${current_dir}/Cargo.toml" ]] && grep -Eq '^[[:space:]]*\[workspace\]' "${current_dir}/Cargo.toml"; then
+            realpath "${current_dir}"
+            return 0
+        fi
+        current_dir="$(dirname "${current_dir}")"
+    done
+    return 1
+}
+
+find_repository_root() {
+    local current_dir="$1"
+
+    while [[ "${current_dir}" != / ]]; do
+        if [[ -d "${current_dir}/.git" || -f "${current_dir}/.git" ]]; then
+            printf '%s\n' "$(realpath "${current_dir}")"
+            return 0
+        fi
+        current_dir="$(dirname "${current_dir}")"
+    done
+    return 1
+}
+
+is_explicit_rw_path_covering() {
+    local candidate="$1"
+    local configured_path
+    local resolved_path
+
+    for configured_path in "${ADD_RW_PATHS[@]}"; do
+        resolved_path="$(realpath -m "${configured_path}")"
+        if is_path_within "${resolved_path}" "${candidate}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+bind_cargo_path_dependencies() {
+    local start_dir="$1"
+    local repository_root
+    local current_dir
+    local manifest_path
+    local line
+    local dependency_path
+    local dependency_dir
+    local processed=0
+    local -a pending_dirs=("${start_dir}")
+    local -A visited_dirs=()
+
+    repository_root="$(find_repository_root "${start_dir}" || true)"
+    while [[ ${#pending_dirs[@]} -gt 0 ]]; do
+        current_dir="${pending_dirs[0]}"
+        pending_dirs=("${pending_dirs[@]:1}")
+        [[ -z "${visited_dirs[${current_dir}]:-}" ]] || continue
+        visited_dirs["${current_dir}"]=1
+        processed=$((processed + 1))
+        if ((processed > 128)); then
+            error "Cargo path dependency graph exceeds the 128-directory safety limit"
+            exit 1
+        fi
+        manifest_path="${current_dir}/Cargo.toml"
+        [[ -f "${manifest_path}" ]] || continue
+
+        while IFS= read -r line; do
+            if [[ "${line}" =~ path[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+                dependency_path="${BASH_REMATCH[1]}"
+            elif [[ "${line}" =~ path[[:space:]]*=[[:space:]]*\'([^\']+)\' ]]; then
+                dependency_path="${BASH_REMATCH[1]}"
+            else
+                continue
+            fi
+            if [[ "${dependency_path}" == /* ]]; then
+                dependency_dir="$(realpath -m "${dependency_path}")"
+            else
+                dependency_dir="$(realpath -m "${current_dir}/${dependency_path}")"
+            fi
+            [[ -d "${dependency_dir}" && -f "${dependency_dir}/Cargo.toml" ]] || continue
+            if [[ -z "${repository_root}" ]] || ! is_path_within "${repository_root}" "${dependency_dir}"; then
+                error "Cargo path dependency escapes the selected repository: ${dependency_dir}"
+                error "select the repository root or authorize it explicitly with --add/--add-rw"
+                exit 1
+            fi
+            pending_dirs+=("${dependency_dir}")
+            if is_path_within "${TARGET_SOURCE_PATH}" "${dependency_dir}" ||
+                is_explicit_rw_path_covering "${dependency_dir}"; then
+                continue
+            fi
+            if [[ -z "${CARGO_PATH_DEPENDENCY_SET[${dependency_dir}]:-}" ]]; then
+                CARGO_PATH_DEPENDENCY_SET["${dependency_dir}"]=1
+                CARGO_PATH_DEPENDENCY_DIRS+=("${dependency_dir}")
+                add_prepared_bind_once --ro-bind "${dependency_dir}" "${dependency_dir}"
+                info "Cargo path dependency: mounted read-only (${dependency_dir})"
+            fi
+        done <"${manifest_path}"
+    done
+}
+
+cargo_workspace_expand_target() {
+    local workspace_root=""
+
+    [[ "${TARGET_KIND}" == "dir" ]] || return 0
+    [[ "${TARGET_PATH}" == "${TARGET_SOURCE_PATH}" ]] || return 0
+    [[ -f "${TARGET_SOURCE_PATH}/Cargo.toml" ]] || return 0
+
+    workspace_root="$(find_cargo_workspace_root "${TARGET_SOURCE_PATH}" || true)"
+    [[ "${workspace_root}" != "${TARGET_SOURCE_PATH}" ]] || workspace_root=""
+    if [[ -z "${workspace_root}" ]]; then
+        bind_cargo_path_dependencies "${TARGET_SOURCE_PATH}"
+    fi
+    if [[ -z "${workspace_root}" ]] && grep -Eq 'workspace[[:space:]]*=[[:space:]]*true' "${TARGET_SOURCE_PATH}/Cargo.toml"; then
+        workspace_root="${TARGET_SOURCE_PARENT_DIR}"
+    fi
+    if [[ -z "${workspace_root}" || "${workspace_root}" == "${TARGET_SOURCE_PATH}" ]]; then
+        return 0
+    fi
+    is_path_within "${workspace_root}" "${TARGET_SOURCE_PATH}" || return 0
+
+    PROJECT_DIR="${workspace_root}"
+    PROJECT_SOURCE_DIR="${workspace_root}"
+    SANDBOX_PROJECT_ROOT="${workspace_root}"
+    SANDBOX_WORKDIR="${TARGET_SOURCE_PATH}"
+    info "Detected Cargo workspace root: ${workspace_root}"
+}
+
+check_bwrap_namespace_support() {
+    local probe_output
+    local -a probe_cmd
+
+    if [[ "${DEVBOX_FORCE_PROBE:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    probe_cmd=(
+        bwrap
+        --unshare-user-try
+        --ro-bind /usr /usr
+        --ro-bind /bin /bin
+        --ro-bind /lib /lib
+        --proc /proc
+        --dev /dev
+    )
+    [[ -d /lib64 ]] && probe_cmd+=(--ro-bind /lib64 /lib64)
+    probe_cmd+=(-- /bin/sh -c 'exit 0')
+
+    if probe_output="$("${probe_cmd[@]}" 2>&1)"; then
+        return 0
+    fi
+
+    case "${probe_output}" in
+    *"Creating new namespace failed"* | *"max_"*"_namespaces exceeded"* | *"(ENOSPC)"*)
+        error "bubblewrap cannot create the namespaces devbox needs in this environment"
+        error "run devbox from a normal host shell or enable unprivileged user namespaces"
+        return 1
+        ;;
+    esac
+
+    error "bubblewrap namespace probe failed: ${probe_output}"
+    return 1
+}
+
+prepare_command_binary() {
+    local command_token="${RAW_COMMAND[0]}"
+    local command_host=""
+    local command_real=""
+
+    if [[ "${command_token}" == */* ]]; then
+        if [[ "${command_token}" == /* ]]; then
+            command_host="${command_token}"
+        else
+            command_host="${PWD}/${command_token}"
+        fi
+    else
+        command_host="$(command -v "${command_token}" 2>/dev/null || true)"
+    fi
+    if [[ "${command_host}" != /* || ! -x "${command_host}" ]]; then
+        error "command not found or not executable: ${command_token}"
+        exit 1
+    fi
+    command_real="$(realpath "${command_host}")"
+    RAW_COMMAND[0]="${command_real}"
+
+    case "${command_real}" in
+    /usr/* | /bin/* | /sbin/*) return 0 ;;
+    esac
+    add_parent_dirs_once "${command_real%/*}"
+    add_extra_bind_once --ro-bind "${command_real}" "${command_real}"
+}
+
+discover_pi_binary() {
+    PI_BIN_HOST="$(command -v "${PI_BIN}" 2>/dev/null || true)"
+    if [[ -z "${PI_BIN_HOST}" ]]; then
+        error "pi binary not found: ${PI_BIN}"
+        exit 1
+    fi
+    if [[ ! -x "${PI_BIN_HOST}" ]]; then
+        error "pi binary is not executable: ${PI_BIN_HOST}"
+        exit 1
+    fi
+
+    PI_BIN_REAL="$(realpath "${PI_BIN_HOST}")"
+    PI_BIN_SANDBOX="${PI_BIN_REAL}"
+
+    add_parent_dirs_once "${PI_BIN_REAL%/*}"
+    case "${PI_BIN_REAL}" in
+    /usr/* | /bin/* | /sbin/*) ;;
+    *)
+        if ! bind_pi_binary_package_tree "${PI_BIN_REAL}"; then
+            add_extra_bind_once --ro-bind "${PI_BIN_REAL}" "${PI_BIN_REAL}"
+        fi
+        ;;
+    esac
+}
+
+ensure_devbox_command_guard_path() {
+    case ":${SANDBOX_PATH}:" in
+    *:/devbox/bin:*) ;;
+    *) SANDBOX_PATH="/devbox/bin:${SANDBOX_PATH}" ;;
+    esac
+}
+
+prepare_pi_command_guard() {
+    local script_dir
+    local guard_host
+    local pi_host
+    local pi_real
+    local guard_sandbox="/devbox/bin/pi"
+
+    if [[ "${PI_COMMAND_DIRECT}" -eq 1 ]]; then
+        pi_real="${PI_BIN_REAL}"
+    else
+        pi_host="$(command -v pi 2>/dev/null || true)"
+        [[ "${pi_host}" == /* && -x "${pi_host}" ]] || return 0
+        pi_real="$(realpath "${pi_host}")"
+    add_parent_dirs_once "${pi_real%/*}"
+        case "${pi_real}" in
+        /usr/* | /bin/* | /sbin/*) ;;
+        *)
+            if ! bind_pi_binary_package_tree "${pi_real}"; then
+                add_extra_bind_once --ro-bind "${pi_real}" "${pi_real}"
+            fi
+            ;;
+        esac
+    fi
+
+    script_dir="${SCRIPT_DIR}"
+    guard_host="${script_dir}/devbox-pi-guard"
+    if [[ ! -x "${guard_host}" ]]; then
+        error "Pi command guard is missing or not executable: ${guard_host}"
+        exit 1
+    fi
+
+    local pi_title_host
+    local pi_title_sandbox="/devbox/pi-title.ts"
+    pi_title_host="${script_dir}/devbox-pi-title.ts"
+    if [[ ! -r "${pi_title_host}" ]]; then
+        error "Pi title extension is missing or unreadable: ${pi_title_host}"
+        exit 1
+    fi
+
+    add_prepared_bind_once --ro-bind "${guard_host}" "${guard_sandbox}"
+    add_sandbox_env_once DEVBOX_REAL_PI "${pi_real}"
+    add_prepared_bind_once --ro-bind "${pi_title_host}" "${pi_title_sandbox}"
+    add_sandbox_env_once DEVBOX_PI_TITLE_EXTENSION "${pi_title_sandbox}"
+    ensure_devbox_command_guard_path
+    if [[ "${PI_COMMAND_DIRECT}" -eq 1 ]]; then
+        RAW_COMMAND[0]="${guard_sandbox}"
+    fi
+}
+
+has_explicit_opencode_port() {
+    local argument
+    local index
+
+    for ((index = 1; index < ${#RAW_COMMAND[@]}; index++)); do
+        argument="${RAW_COMMAND[index]}"
+        case "${argument}" in
+        --port | --port=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+is_opencode_port_live() {
+    local port="$1"
+    local timeout_seconds="${DEVBOX_PORT_PROBE_TIMEOUT:-0.3}"
+    local bash_bin="${BASH:-bash}"
+
+    case "${port}" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    ((port >= 1 && port <= 65535)) || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    # shellcheck disable=SC2016 # $1 expands inside the probe shell.
+    timeout "${timeout_seconds}" "${bash_bin}" -c ':</dev/tcp/127.0.0.1/$1' _ "${port}" >/dev/null 2>&1
+}
+
+apply_nvim_opencode_port_default() {
+    local command_name
+
+    command_name="${RAW_COMMAND[0]##*/}"
+    [[ "${command_name}" == "opencode" ]] || return 0
+    [[ -n "${NVIM_OPENCODE_PORT:-}" ]] || return 0
+    has_explicit_opencode_port && return 0
+    is_opencode_port_live "${NVIM_OPENCODE_PORT}" || return 0
+    RAW_COMMAND=("${RAW_COMMAND[0]}" --port "${NVIM_OPENCODE_PORT}" "${RAW_COMMAND[@]:1}")
+}
+
+run_opencode_plugin_preflight() {
+    local command_name
+    local script_dir
+    local integrity_helper
+    local config_path="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}/opencode/opencode.json"
+    local package_cache="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}/opencode/packages"
+    local integrity_cache="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}/devbox/opencode/plugin-integrity-v1.bin"
+
+    command_name="${RAW_COMMAND[0]##*/}"
+    [[ "${command_name}" == "opencode" ]] || return 0
+    case "${RAW_COMMAND[1]:-}" in
+    plugin | plug) return 0 ;;
+    esac
+
+    script_dir="${SCRIPT_DIR}"
+    integrity_helper="${script_dir}/devbox-opencode-integrity"
+    if [[ ! -x "${integrity_helper}" ]]; then
+        error "OpenCode plugin integrity helper is missing: ${integrity_helper}"
+        return 1
+    fi
+    if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
+        DEVBOX_OPENCODE_INTEGRITY_NO_CACHE=1 \
+            "${integrity_helper}" "${config_path}" "${package_cache}" "${integrity_cache}" || {
+                error "OpenCode plugin preflight failed; repair the listed plugins before launch"
+                return 1
+            }
+        return 0
+    fi
+    if ! "${integrity_helper}" "${config_path}" "${package_cache}" "${integrity_cache}"; then
+        error "OpenCode plugin preflight failed; repair the listed plugins before launch"
+        return 1
+    fi
+}
+
+prepare_opencode_command_guard() {
+    local script_dir
+    local guard_host
+    local helper_host
+    local opencode_host
+    local opencode_real
+    local guard_sandbox="/devbox/bin/opencode"
+    local helper_sandbox="/devbox/lib/devbox-opencode-integrity"
+
+    opencode_host="$(command -v opencode 2>/dev/null || true)"
+    [[ "${opencode_host}" == /* && -x "${opencode_host}" ]] || return 0
+    opencode_real="$(realpath "${opencode_host}")"
+    script_dir="${SCRIPT_DIR}"
+    guard_host="${script_dir}/devbox-opencode-guard"
+    helper_host="${script_dir}/devbox-opencode-integrity"
+    if [[ ! -x "${guard_host}" || ! -x "${helper_host}" ]]; then
+        error "OpenCode command guard or integrity helper is missing from ${script_dir}"
+        exit 1
+    fi
+
+    case "${opencode_real}" in
+    /usr/* | /bin/* | /sbin/*) ;;
+    *) add_prepared_bind_once --ro-bind "${opencode_real}" "${opencode_real}" ;;
+    esac
+    add_prepared_bind_once --ro-bind "${guard_host}" "${guard_sandbox}"
+    add_prepared_bind_once --ro-bind "${helper_host}" "${helper_sandbox}"
+    add_sandbox_env_once DEVBOX_REAL_OPENCODE "${opencode_real}"
+    add_sandbox_env_once DEVBOX_OPENCODE_INTEGRITY_HELPER "${helper_sandbox}"
+    add_sandbox_env_once OPENCODE_CONFIG_CONTENT \
+        "{\"instructions\":[\"${DEVBOX_AGENT_CONTEXT_SANDBOX}\"]}"
+    ensure_devbox_command_guard_path
+}
+
+discover_git_wrapper() {
+    local requested_devbox_git
+    local requested_real_git
+    local requested_devbox_git_real
+    local requested_real_git_real
+
+    requested_devbox_git="${DEVBOX_GIT:-${SCRIPT_DIR}/devbox-git}"
+    requested_real_git="$(command -v git 2>/dev/null || true)"
+
+    if [[ ! -x "${requested_devbox_git}" ]]; then
+        error "devbox-git wrapper not found or not executable: ${requested_devbox_git}"
+        exit 1
+    fi
+    if [[ -z "${requested_real_git}" || ! -x "${requested_real_git}" ]]; then
+        error "real git binary not found in host PATH"
+        exit 1
+    fi
+    requested_devbox_git_real="$(realpath "${requested_devbox_git}")"
+    requested_real_git_real="$(realpath "${requested_real_git}")"
+
+    if is_discovery_cache_current "${DEVBOX_CACHE_BWRAP_PATH}" "${DEVBOX_CACHE_BWRAP_VERSION}" &&
+        [[ "${DEVBOX_CACHE_DEVBOX_GIT_HOST:-}" == "${requested_devbox_git}" ]] &&
+        [[ "${DEVBOX_CACHE_DEVBOX_GIT_REALPATH:-}" == "${requested_devbox_git_real}" && -x "${requested_devbox_git_real}" ]]; then
+        DEVBOX_GIT_HOST="${requested_devbox_git_real}"
+    else
+        DEVBOX_GIT_HOST="${requested_devbox_git_real}"
+        DEVBOX_CACHE_DEVBOX_GIT_HOST="${requested_devbox_git}"
+        DEVBOX_CACHE_DEVBOX_GIT_REALPATH="${DEVBOX_GIT_HOST}"
+    fi
+
+    if is_discovery_cache_current "${DEVBOX_CACHE_BWRAP_PATH}" "${DEVBOX_CACHE_BWRAP_VERSION}" &&
+        [[ "${DEVBOX_CACHE_REAL_GIT_HOST:-}" == "${requested_real_git}" ]] &&
+        [[ "${DEVBOX_CACHE_REAL_GIT_REALPATH:-}" == "${requested_real_git_real}" && -x "${requested_real_git_real}" ]]; then
+        REAL_GIT_HOST="${requested_real_git_real}"
+    else
+        REAL_GIT_HOST="${requested_real_git_real}"
+        DEVBOX_CACHE_REAL_GIT_HOST="${requested_real_git}"
+        DEVBOX_CACHE_REAL_GIT_REALPATH="${REAL_GIT_HOST}"
+    fi
+    write_discovery_cache
+}
+
+opt_ro_bind_terminal_file() {
+    local host_p="$1"
+    local sand_p="$2"
+    local label="$3"
+
+    [[ -e "${host_p}" ]] || return 0
+    opt_ro_bind_path "${host_p}" "${sand_p}"
+    info "Terminal integration: mounted ${label} read-only"
+}
+
+bind_zsh_startup_files() {
+    local host_dir="$1"
+    local sand_dir="$2"
+    local zsh_file
+    local -a zsh_startup_files=(.zshenv .zshrc .zprofile .zlogin)
+
+    for zsh_file in "${zsh_startup_files[@]}"; do
+        opt_ro_bind_terminal_file "${host_dir}/${zsh_file}" "${sand_dir}/${zsh_file}" "${zsh_file}"
+    done
+}
+
+process_start_time() {
+    local pid="$1"
+    awk '{ print $22 }' "/proc/${pid}/stat" 2>/dev/null || true
+}
+
+prune_stale_editor_runtimes() {
+    local runtime_base="$1"
+    local candidate
+    local name
+    local pid
+    local started
+    local current_started
+    local remainder
+    local had_nullglob=0
+    local -a candidates=()
+
+    shopt -q nullglob && had_nullglob=1
+    shopt -s nullglob
+    candidates=("${runtime_base}"/run.*.*.*)
+    ((had_nullglob)) || shopt -u nullglob
+    for candidate in "${candidates[@]}"; do
+        [[ -d "${candidate}" && ! -L "${candidate}" ]] || continue
+        [[ "$(stat -c %u -- "${candidate}" 2>/dev/null || true)" == "$(id -u)" ]] || continue
+        name="${candidate##*/}"
+        remainder="${name#run.}"
+        pid="${remainder%%.*}"
+        remainder="${remainder#*.}"
+        started="${remainder%%.*}"
+        [[ "${pid}" =~ ^[0-9]+$ && "${started}" =~ ^[0-9]+$ ]] || continue
+        current_started="$(process_start_time "${pid}")"
+        [[ -n "${current_started}" && "${current_started}" == "${started}" ]] && continue
+        rm -rf -- "${candidate}"
+    done
+}
+
+prepare_nvim_editor_runtime() {
+    local host_runtime="${XDG_RUNTIME_DIR:-}"
+    local runtime_parent
+    local process_started
+    local uid
+
+    [[ "${ALLOW_NVIM_REMOTE}" -eq 1 && "${ALLOW_TERMINAL_SOCKETS}" -eq 1 ]] || return 0
+    [[ -n "${NVIM:-}" && "${NVIM}" == /* && -S "${NVIM}" ]] || return 0
+
+    uid="$(id -u)"
+    if [[ "${host_runtime}" == /* && -d "${host_runtime}" && ! -L "${host_runtime}" && -w "${host_runtime}" ]] &&
+        [[ "$(stat -c %u -- "${host_runtime}" 2>/dev/null || true)" == "${uid}" ]] &&
+        [[ "$(stat -c %a -- "${host_runtime}" 2>/dev/null || true)" == 700 ]]; then
+        runtime_parent="${host_runtime}"
+    else
+        runtime_parent="/tmp/devbox-editor-runtime-${uid}"
+        if [[ -L "${runtime_parent}" || ( -e "${runtime_parent}" && ! -d "${runtime_parent}" ) ]]; then
+            error "unsafe fallback editor runtime path: ${runtime_parent}"
+            exit 1
+        fi
+        if [[ ! -d "${runtime_parent}" ]]; then
+            (umask 077 && mkdir -- "${runtime_parent}") || {
+                error "failed to create editor runtime base: ${runtime_parent}"
+                exit 1
+            }
+        fi
+        if [[ "$(stat -c %u -- "${runtime_parent}" 2>/dev/null || true)" != "${uid}" ]]; then
+            error "editor runtime base is not owned by the current user: ${runtime_parent}"
+            exit 1
+        fi
+        chmod 0700 -- "${runtime_parent}"
+    fi
+
+    DEVBOX_EDITOR_RUNTIME_BASE="${runtime_parent}/devbox"
+    if [[ -L "${DEVBOX_EDITOR_RUNTIME_BASE}" || ( -e "${DEVBOX_EDITOR_RUNTIME_BASE}" && ! -d "${DEVBOX_EDITOR_RUNTIME_BASE}" ) ]]; then
+        error "unsafe Devbox editor runtime path: ${DEVBOX_EDITOR_RUNTIME_BASE}"
+        exit 1
+    fi
+    if [[ ! -d "${DEVBOX_EDITOR_RUNTIME_BASE}" ]]; then
+        (umask 077 && mkdir -- "${DEVBOX_EDITOR_RUNTIME_BASE}") || {
+            error "failed to create Devbox editor runtime: ${DEVBOX_EDITOR_RUNTIME_BASE}"
+            exit 1
+        }
+    fi
+    if [[ "$(stat -c %u -- "${DEVBOX_EDITOR_RUNTIME_BASE}" 2>/dev/null || true)" != "${uid}" ]]; then
+        error "Devbox editor runtime is not owned by the current user: ${DEVBOX_EDITOR_RUNTIME_BASE}"
+        exit 1
+    fi
+    chmod 0700 -- "${DEVBOX_EDITOR_RUNTIME_BASE}"
+    prune_stale_editor_runtimes "${DEVBOX_EDITOR_RUNTIME_BASE}"
+
+    process_started="$(process_start_time "$$")"
+    [[ "${process_started}" =~ ^[0-9]+$ ]] || {
+        error "could not identify the Devbox process lifetime for editor runtime cleanup"
+        exit 1
+    }
+    DEVBOX_TMPDIR="$(mktemp -d "${DEVBOX_EDITOR_RUNTIME_BASE}/run.$$.${process_started}.XXXXXXXX")" || {
+        error "failed to create per-run Neovim editor runtime"
+        exit 1
+    }
+    chmod 0700 -- "${DEVBOX_TMPDIR}"
+    DEVBOX_EDITOR_RUNTIME_SHARED=1
+
+    if is_path_within /tmp "${DEVBOX_EDITOR_RUNTIME_BASE}"; then
+        add_extra_dir_once "${runtime_parent}"
+        add_extra_dir_once "${DEVBOX_EDITOR_RUNTIME_BASE}"
+    else
+        add_parent_dirs_once "${DEVBOX_EDITOR_RUNTIME_BASE}"
+    fi
+    add_extra_bind_once --bind "${DEVBOX_TMPDIR}" "${DEVBOX_TMPDIR}"
+    add_sandbox_env_once XDG_RUNTIME_DIR "${DEVBOX_TMPDIR}"
+    info "Neovim integration: exact-sharing owner-only editor runtime ${DEVBOX_TMPDIR}"
+}
+
+bind_terminal_socket_path() {
+    local env_name="$1"
+    local host_p="$2"
+    local sand_p
+
+    if [[ -z "${host_p}" ]]; then
+        return 1
+    fi
+    case "${host_p}" in
+    /*) ;;
+    *)
+        warning "not forwarding ${env_name}; socket path is not absolute: ${host_p}"
+        return 1
+        ;;
+    esac
+    if [[ ! -S "${host_p}" ]]; then
+        warning "not forwarding ${env_name}; not an existing Unix socket: ${host_p}"
+        return 1
+    fi
+
+    map_host_path_to_sandbox "${host_p}"
+    sand_p="${REPLY}"
+    bind_runtime_dir_precreated "${host_p}" "${sand_p}"
+    info "Terminal integration: mounted ${env_name} socket ${host_p}"
+    REPLY="${sand_p}"
+}
+
+bind_terminal_socket_env() {
+    local env_name="$1"
+    local host_p="${!env_name:-}"
+    local sand_p
+
+    bind_terminal_socket_path "${env_name}" "${host_p}" || return 0
+    sand_p="${REPLY}"
+    add_sandbox_env_once "${env_name}" "${sand_p}"
+}
+
+bind_tmux_socket_env() {
+    local tmux_value="${TMUX:-}"
+    local tmux_socket
+    local tmux_suffix
+    local sand_socket
+
+    [[ -n "${tmux_value}" ]] || return 0
+    tmux_socket="${tmux_value%%,*}"
+    tmux_suffix="${tmux_value#"${tmux_socket}"}"
+
+    bind_terminal_socket_path TMUX "${tmux_socket}" || return 0
+    sand_socket="${REPLY}"
+    add_sandbox_env_once TMUX "${sand_socket}${tmux_suffix}"
+    if [[ -n "${TMUX_PANE:-}" ]]; then
+        add_sandbox_env_once TMUX_PANE "${TMUX_PANE}"
+    fi
+}
+
+discover_active_pty() {
+    local candidate=""
+    local fd
+
+    ACTIVE_PTY_PATH=""
+    if [[ -t 0 || -t 1 || -t 2 ]] && [[ -r /dev/tty ]]; then
+        candidate="$({ tty </dev/tty; } 2>/dev/null || true)"
+    fi
+    if [[ ! "${candidate}" =~ ^/dev/pts/[0-9]+$ || ! -c "${candidate}" ]]; then
+        candidate=""
+        for fd in 0 1 2; do
+            [[ -t "${fd}" ]] || continue
+            candidate="$(readlink -f "/proc/self/fd/${fd}" 2>/dev/null || true)"
+            if [[ "${candidate}" =~ ^/dev/pts/[0-9]+$ && -c "${candidate}" ]]; then
+                break
+            fi
+            candidate=""
+        done
+    fi
+    if [[ -n "${candidate}" ]]; then
+        ACTIVE_PTY_PATH="${candidate}"
+        info "Terminal integration: preserving active PTY ${ACTIVE_PTY_PATH}"
+    fi
+}
+
+bind_nvim_resources() {
+    local host_config_root="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}"
+    local host_data_root="${XDG_DATA_HOME:-${HOST_HOME}/.local/share}"
+    local host_state_root="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}"
+    local host_cache_root="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}"
+    local host_nvim_config="${host_config_root}/nvim"
+    local host_nvim_data="${host_data_root}/nvim"
+    local host_nvim_lazy="${host_data_root}/nvim/lazy"
+    local host_nvim_lock="${host_config_root}/nvim/lazy-lock.json"
+    local host_nvim_state="${host_state_root}/nvim"
+    local host_nvim_cache="${host_cache_root}/nvim"
+    local host_devbox_nvim_lazy="${host_data_root}/devbox/nvim/lazy"
+    local host_devbox_nvim_lock="${host_state_root}/devbox/nvim/lazy-lock.json"
+    local sandbox_nvim_config="${SANDBOX_CONFIG_DIR}/nvim"
+    local sandbox_nvim_data="${SANDBOX_LOCAL_SHARE_DIR}/nvim"
+    local sandbox_nvim_state="${SANDBOX_LOCAL_STATE_DIR}/nvim"
+    local sandbox_nvim_cache="${SANDBOX_CACHE_DIR}/nvim"
+    local plugin_path
+    local resolved_config
+    local resolved_config_sandbox
+    local nvim_config_mounted=0
+    local had_dotglob=0
+    local had_nullglob=0
+
+    [[ "${ALLOW_NVIM_REMOTE}" -eq 1 ]] || return 0
+
+    if is_project_owned_path "${sandbox_nvim_config}"; then
+        # The selected project is this configuration tree: the project bind
+        # owns it (writable unless --ro), so the read-only resource mounts and
+        # the lazy-lock.json state overlay must not shadow project edits.
+        info "Neovim integration: configuration is the selected project; the project bind owns the tree"
+    elif [[ -d "${host_nvim_config}" ]]; then
+        nvim_config_mounted=1
+        resolved_config="$(realpath "${host_nvim_config}")"
+        add_prepared_bind_once --ro-bind "${host_nvim_config}" "${sandbox_nvim_config}"
+        map_host_path_to_sandbox "${resolved_config}"
+        resolved_config_sandbox="${REPLY}"
+        if [[ "${resolved_config_sandbox}" != "${sandbox_nvim_config}" ]]; then
+            add_prepared_bind_once --ro-bind "${resolved_config}" "${resolved_config_sandbox}"
+        fi
+        bind_symlink_targets_in_dir --ro-bind "${resolved_config}"
+        info "Neovim integration: mounted host configuration read-only"
+    fi
+    [[ -d "${host_nvim_data}" ]] && add_prepared_bind_once --ro-bind "${host_nvim_data}" "${sandbox_nvim_data}"
+
+    if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
+        add_extra_dir_once "${sandbox_nvim_state}"
+        add_extra_dir_once "${sandbox_nvim_cache}"
+        return 0
+    fi
+
+    bind_runtime_dir "${host_nvim_state}" "${sandbox_nvim_state}"
+    bind_runtime_dir "${host_nvim_cache}" "${sandbox_nvim_cache}"
+    [[ -d "${host_nvim_config}" ]] || return 0
+
+    # lazy.nvim needs to create missing plugin directories, but existing host
+    # plugins should remain immutable. A dedicated devbox data directory is the
+    # writable layer; exact read-only child mounts preserve host installations.
+    bind_prepared_runtime_dir "${host_devbox_nvim_lazy}" "${sandbox_nvim_data}/lazy"
+    if [[ -d "${host_nvim_lazy}" ]]; then
+        shopt -q dotglob && had_dotglob=1
+        shopt -q nullglob && had_nullglob=1
+        shopt -s dotglob nullglob
+        for plugin_path in "${host_nvim_lazy}"/*; do
+            [[ -e "${plugin_path}" ]] || continue
+            add_prepared_bind_once --ro-bind "${plugin_path}" \
+        "${sandbox_nvim_data}/lazy/${plugin_path##*/}"
+        done
+        ((had_dotglob)) || shopt -u dotglob
+        ((had_nullglob)) || shopt -u nullglob
+    fi
+
+    # Keep the configuration tree read-only while giving an existing lazy.nvim
+    # lockfile one exact writable overlay backed by devbox state. Bubblewrap
+    # cannot create a new file mountpoint beneath a read-only directory, so a
+    # configuration without lazy-lock.json simply keeps the whole tree read-only.
+    if [[ -f "${host_nvim_lock}" && "${nvim_config_mounted}" -eq 1 ]]; then
+    mkdir -p -- "${host_devbox_nvim_lock%/*}"
+        if [[ ! -e "${host_devbox_nvim_lock}" ]]; then
+            cp -p -- "${host_nvim_lock}" "${host_devbox_nvim_lock}"
+        fi
+        add_prepared_bind_once --bind "${host_devbox_nvim_lock}" \
+            "${sandbox_nvim_config}/lazy-lock.json"
+    fi
+}
+
+bind_terminal_integration() {
+    local xdg_starship=""
+    local sand_xdg_starship=""
+    local zdotdir_sandbox=""
+
+    opt_ro_bind_terminal_file "${HOST_HOME}/.config/starship.toml" "${SANDBOX_HOME}/.config/starship.toml" starship.toml
+
+    if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        xdg_starship="${XDG_CONFIG_HOME}/starship.toml"
+        map_host_path_to_sandbox "${xdg_starship}"
+        sand_xdg_starship="${REPLY}"
+        opt_ro_bind_terminal_file "${xdg_starship}" "${sand_xdg_starship}" XDG_CONFIG_HOME/starship.toml
+    fi
+
+    bind_zsh_startup_files "${HOST_HOME}" "${SANDBOX_HOME}"
+    # The zsh configuration tree typically lives behind a symlink into the
+    # user's dotfiles repository; bind the resolved target read-only at the
+    # symlink destination, mirroring the starship.toml treatment above.
+    if [[ -d "${HOST_HOME}/.config/zsh" ]]; then
+        opt_ro_bind_dir "${HOST_HOME}/.config/zsh" "${SANDBOX_HOME}/.config/zsh"
+        # Share the plugin manager and its compiled cache writable, like the
+        # pnpm store, so zinit neither reinstalls inside the sandbox nor
+        # regenerates caches on every launch.
+        bind_runtime_dir "${HOST_HOME}/.local/share/zinit" "${SANDBOX_HOME}/.local/share/zinit"
+        bind_runtime_dir "${HOST_HOME}/.cache/zinit" "${SANDBOX_HOME}/.cache/zinit"
+        info "Terminal integration: mounted zsh configuration closure"
+    fi
+    if [[ -n "${ZDOTDIR:-}" ]]; then
+        if [[ "${ZDOTDIR}" == /* ]] && is_path_within "${HOST_HOME}" "${ZDOTDIR}"; then
+            map_host_path_to_sandbox "${ZDOTDIR}"
+            zdotdir_sandbox="${REPLY}"
+            bind_zsh_startup_files "${ZDOTDIR}" "${zdotdir_sandbox}"
+        else
+            warning "not mounting ZDOTDIR; it is outside HOME or not absolute: ${ZDOTDIR}"
+        fi
+    fi
+
+    if [[ "${ALLOW_TERMINAL_SOCKETS}" -eq 1 ]]; then
+        if [[ "${ALLOW_NVIM_REMOTE}" -eq 1 ]]; then
+            bind_terminal_socket_env NVIM
+            bind_terminal_socket_env NVIM_LISTEN_ADDRESS
+        fi
+        bind_tmux_socket_env
+    fi
+}
+
+bind_aws_integration() {
+    local host_aws_dir="${HOST_HOME}/.aws"
+    local sandbox_aws_dir="${SANDBOX_HOME}/.aws"
+    local env_name
+    local host_path
+    local sandbox_path
+
+    [[ "${ALLOW_AWS}" -eq 1 ]] || return 0
+
+    if [[ -d "${host_aws_dir}" ]]; then
+        opt_ro_bind_dir "${host_aws_dir}" "${sandbox_aws_dir}"
+        bind_runtime_dir "${host_aws_dir}/sso/cache" "${sandbox_aws_dir}/sso/cache"
+        bind_runtime_dir "${host_aws_dir}/cli/cache" "${sandbox_aws_dir}/cli/cache"
+        info "AWS integration: configuration is read-only; SSO/CLI caches are writable"
+    fi
+
+    for env_name in AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE; do
+        host_path="${!env_name:-}"
+        [[ -n "${host_path}" ]] || continue
+        if [[ "${host_path}" != /* ]]; then
+            host_path="$(realpath -m "${PWD}/${host_path}")"
+        fi
+        if [[ ! -f "${host_path}" || ! -r "${host_path}" ]]; then
+            error "${env_name} does not name a readable file: ${host_path}"
+            exit 1
+        fi
+        map_host_path_to_sandbox "${host_path}"
+        sandbox_path="${REPLY}"
+        opt_ro_bind_path "${host_path}" "${sandbox_path}"
+        add_sandbox_env_once "${env_name}" "${sandbox_path}"
+    done
+}
+
+bind_symlink_targets_in_dir() {
+    local bind_flag="$1"
+    local host_dir="$2"
+    local host_path
+    local resolved_target
+    local target_sandbox_path
+    local had_nullglob=0
+    local had_dotglob=0
+    local -a symlink_candidates=()
+
+    [[ -d "${host_dir}" ]] || return 0
+    shopt -q nullglob && had_nullglob=1
+    shopt -q dotglob && had_dotglob=1
+    shopt -s nullglob dotglob
+    symlink_candidates=("${host_dir}"/*)
+    ((had_nullglob)) || shopt -u nullglob
+    ((had_dotglob)) || shopt -u dotglob
+
+    for host_path in "${symlink_candidates[@]}"; do
+        [[ -L "${host_path}" ]] || continue
+        resolved_target="$(realpath "${host_path}")"
+        map_host_path_to_sandbox "${resolved_target}"
+        target_sandbox_path="${REPLY}"
+        add_prepared_bind_once "${bind_flag}" "${resolved_target}" "${target_sandbox_path}"
+    done
+}
+
+bind_skills_home_symlink_targets() {
+    local skills_home
+    local resolved_home
+    local host_path
+    local resolved_target
+    local target_sandbox_path
+    local existing_policy
+    local had_nullglob=0
+    local had_dotglob=0
+    local -a skills_homes=()
+    local -a symlink_candidates=()
+    local -A visited_homes=()
+
+    if [[ -d "${HOST_HOME}/.agents/skills" ]]; then
+        skills_homes+=("${HOST_HOME}/.agents/skills")
+    fi
+    if [[ -d "${PI_AGENT_DIR}/skills" ]]; then
+        skills_homes+=("$(realpath "${PI_AGENT_DIR}/skills")")
+    fi
+    (( ${#skills_homes[@]} )) || return 0
+
+    for skills_home in "${skills_homes[@]}"; do
+        resolved_home="$(realpath "${skills_home}")"
+        [[ -n "${visited_homes[${resolved_home}]:-}" ]] && continue
+        visited_homes["${resolved_home}"]=1
+
+        shopt -q nullglob && had_nullglob=1
+        shopt -q dotglob && had_dotglob=1
+        shopt -s nullglob dotglob
+        symlink_candidates=("${skills_home}"/*)
+        ((had_nullglob)) || shopt -u nullglob
+        ((had_dotglob)) || shopt -u dotglob
+
+        for host_path in "${symlink_candidates[@]}"; do
+            [[ -L "${host_path}" ]] || continue
+            resolved_target="$(realpath "${host_path}" 2>/dev/null || true)"
+            if [[ -z "${resolved_target}" || ! -d "${resolved_target}" ]]; then
+                warning "Skipping skills symlink without a directory target: ${host_path}"
+                continue
+            fi
+            if [[ "${resolved_target}" == "${HOST_HOME}" ]] || \
+                ! is_path_within "${HOST_HOME}" "${resolved_target}"; then
+                warning "Skipping skills symlink escaping HOME: ${host_path} -> ${resolved_target}"
+                continue
+            fi
+            map_host_path_to_sandbox "${resolved_target}"
+            target_sandbox_path="${REPLY}"
+            existing_policy="${EXTRA_BIND_DEST_SET[${target_sandbox_path}]:-}"
+            if [[ -n "${existing_policy}" && "${existing_policy}" != "--ro-bind|${resolved_target}" ]]; then
+                info "Preserving existing mount for skills symlink target: ${target_sandbox_path}"
+                continue
+            fi
+            add_prepared_bind_once --ro-bind "${resolved_target}" "${target_sandbox_path}"
+            info "Skills symlink target mounted read-only: ${host_path} -> ${target_sandbox_path}"
+        done
+    done
+}
+
+bind_appa_config() {
+    local host_config_appa="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}/appa"
+    local sand_config_appa="${SANDBOX_CONFIG_DIR}/appa"
+
+    [[ -d "${host_config_appa}" ]] || return 0
+    opt_ro_bind_dir "${host_config_appa}" "${sand_config_appa}"
+    bind_symlink_targets_in_dir --ro-bind "${host_config_appa}"
+    info "AppA integration: mounted appa configuration read-only"
+}
+
+bind_opencode_state() {
+    local relative_path
+    local host_config_root="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}"
+    local host_data_root="${XDG_DATA_HOME:-${HOST_HOME}/.local/share}"
+    local host_state_root="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}"
+    local host_cache_root="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}"
+    local host_opencode_config="${host_config_root}/opencode"
+    local host_openspec_config="${host_config_root}/openspec"
+    local host_opencode_data="${host_data_root}/opencode"
+    local host_opencode_state="${host_state_root}/opencode"
+    local host_opencode_cache="${host_cache_root}/opencode"
+    local sandbox_openspec_config="${SANDBOX_HOME}/.config/openspec"
+    local openspec_destination_reserved=0
+    local -a ephemeral_paths=(
+        ".local/share/opencode"
+        ".local/state/opencode"
+        ".cache/opencode"
+        ".cache/devbox/opencode"
+        ".opencode"
+        ".bun"
+        ".cache/bun"
+        ".cache/ms-playwright"
+        ".opencode-browser"
+    )
+
+    [[ -n "${EXTRA_BIND_DEST_SET[${sandbox_openspec_config}]:-}" ]] && openspec_destination_reserved=1
+
+    if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
+        opt_ro_bind_dir "${host_opencode_config}" "${SANDBOX_HOME}/.config/opencode"
+        if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
+            opt_ro_bind_dir "${host_openspec_config}" "${sandbox_openspec_config}"
+        else
+            info "OpenSpec state: preserving the project-specific read-only mount"
+        fi
+        opt_ro_bind_dir "${HOST_HOME}/.agents" "${SANDBOX_HOME}/.agents"
+        opt_ro_bind_dir "${HOST_HOME}/.claude" "${SANDBOX_HOME}/.claude"
+        for relative_path in "${ephemeral_paths[@]}"; do
+            add_extra_dir_once "${SANDBOX_HOME}/${relative_path}"
+        done
+        opt_ro_bind_dir "${host_opencode_cache}/packages" "${SANDBOX_HOME}/.cache/opencode/packages"
+        bind_symlink_targets_in_dir --ro-bind "${host_opencode_config}"
+        bind_symlink_targets_in_dir --ro-bind "${host_opencode_config}/agent"
+        bind_symlink_targets_in_dir --ro-bind "${host_opencode_config}/agents"
+        if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
+            bind_symlink_targets_in_dir --ro-bind "${host_openspec_config}"
+        fi
+        return 0
+    fi
+
+    bind_runtime_dir "${host_opencode_config}" "${SANDBOX_HOME}/.config/opencode"
+    if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
+        bind_runtime_dir "${host_openspec_config}" "${sandbox_openspec_config}"
+    else
+        info "OpenSpec state: preserving the project-specific read-only mount"
+    fi
+    bind_runtime_dir "${host_opencode_data}" "${SANDBOX_HOME}/.local/share/opencode"
+    # The Neovim editor bridge hands files to the host server through this
+    # shared state path; a sandbox-only path is invisible to the host Neovim.
+    bind_runtime_dir "${host_opencode_state}" "${SANDBOX_HOME}/.local/state/opencode"
+    bind_runtime_dir "${host_opencode_cache}" "${SANDBOX_HOME}/.cache/opencode"
+    bind_runtime_dir "${host_cache_root}/devbox/opencode" "${SANDBOX_HOME}/.cache/devbox/opencode"
+    bind_runtime_dir "${HOST_HOME}/.opencode" "${SANDBOX_HOME}/.opencode"
+    bind_runtime_dir "${HOST_HOME}/.agents" "${SANDBOX_HOME}/.agents"
+    bind_runtime_dir "${HOST_HOME}/.bun" "${SANDBOX_HOME}/.bun"
+    bind_runtime_dir "${host_cache_root}/bun" "${SANDBOX_HOME}/.cache/bun"
+    bind_runtime_dir "${host_cache_root}/ms-playwright" "${SANDBOX_HOME}/.cache/ms-playwright"
+    if [[ -d "${HOST_HOME}/.claude" ]]; then
+        bind_runtime_dir "${HOST_HOME}/.claude" "${SANDBOX_HOME}/.claude"
+    fi
+    if [[ -d "${HOST_HOME}/.opencode-browser" ]]; then
+        bind_runtime_dir "${HOST_HOME}/.opencode-browser" "${SANDBOX_HOME}/.opencode-browser"
+    fi
+
+    bind_symlink_targets_in_dir --bind "${host_opencode_config}"
+    bind_symlink_targets_in_dir --bind "${host_opencode_config}/agent"
+    bind_symlink_targets_in_dir --bind "${host_opencode_config}/agents"
+    if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
+        bind_symlink_targets_in_dir --bind "${host_openspec_config}"
+    fi
+}
+
+prepare_ssh_client_integration() {
+    local host_ssh_dir="${HOST_HOME}/.ssh"
+    local config_path
+    local config_name
+    local config_fd
+    local known_hosts_path
+    local known_hosts_name
+    local known_hosts_fd
+    local public_key
+    local had_nullglob=0
+    local -a system_config_files=()
+
+    if [[ -d /etc/ssh/ssh_config.d ]]; then
+        shopt -q nullglob && had_nullglob=1
+        shopt -s nullglob
+        system_config_files=(/etc/ssh/ssh_config.d/*.conf)
+        ((had_nullglob)) || shopt -u nullglob
+        for config_path in "${system_config_files[@]}"; do
+            [[ -f "${config_path}" && -r "${config_path}" ]] || continue
+    config_name="${config_path##*/}"
+            exec {config_fd}<"${config_path}"
+            SSH_CLIENT_FDS+=("${config_fd}")
+            SSH_SYSTEM_CONFIG_ARGS+=(
+                --perms 0644
+                --file "${config_fd}" "/etc/ssh/ssh_config.d/${config_name}"
+            )
+        done
+        if [[ "${#SSH_SYSTEM_CONFIG_ARGS[@]}" -gt 0 ]]; then
+            SSH_SYSTEM_CONFIG_ARGS=(
+                --perms 0755
+                --tmpfs /etc/ssh/ssh_config.d
+                "${SSH_SYSTEM_CONFIG_ARGS[@]}"
+                --remount-ro /etc/ssh/ssh_config.d
+            )
+        fi
+    fi
+
+    [[ "${LOCKED_MODE}" -eq 0 && -d "${host_ssh_dir}" ]] || return 0
+    add_extra_dir_once "${SANDBOX_HOME}/.ssh"
+
+    config_path="${host_ssh_dir}/config"
+    if [[ -f "${config_path}" && -r "${config_path}" ]]; then
+        exec {config_fd}<"${config_path}"
+        SSH_CLIENT_FDS+=("${config_fd}")
+        SSH_USER_CONFIG_ARGS+=(
+            --perms 0600
+            --ro-bind-data "${config_fd}" "${SANDBOX_HOME}/.ssh/config"
+        )
+    fi
+
+    for known_hosts_name in known_hosts known_hosts2; do
+        known_hosts_path="${host_ssh_dir}/${known_hosts_name}"
+        [[ -f "${known_hosts_path}" && -r "${known_hosts_path}" ]] || continue
+        exec {known_hosts_fd}<"${known_hosts_path}"
+        SSH_CLIENT_FDS+=("${known_hosts_fd}")
+        SSH_USER_CONFIG_ARGS+=(
+            --perms 0600
+            --file "${known_hosts_fd}" "${SANDBOX_HOME}/.ssh/${known_hosts_name}"
+        )
+    done
+
+    while IFS= read -r -d '' public_key; do
+        add_prepared_bind_once --ro-bind "${public_key}" "${public_key}"
+    done < <(find "${host_ssh_dir}" -type f -name '*.pub' -print0)
+}
+
+bind_clipboard_integration() {
+    local runtime_dir="${XDG_RUNTIME_DIR:-}"
+    local wayland_display="${WAYLAND_DISPLAY:-}"
+    local wayland_socket=""
+    local sandbox_wayland_socket=""
+    local display_value="${DISPLAY:-}"
+    local display_number=""
+    local x11_socket=""
+    local xauthority_path=""
+    local sandbox_xauthority=""
+
+    [[ "${ALLOW_CLIPBOARD}" -eq 1 ]] || return 0
+
+    if [[ -n "${runtime_dir}" && "${runtime_dir}" == /* && -n "${wayland_display}" ]]; then
+        if [[ "${wayland_display}" == /* ]]; then
+            wayland_socket="${wayland_display}"
+        else
+            wayland_socket="${runtime_dir}/${wayland_display}"
+        fi
+        if [[ -S "${wayland_socket}" ]]; then
+            sandbox_wayland_socket="${wayland_socket}"
+            if [[ "${DEVBOX_EDITOR_RUNTIME_SHARED}" -eq 1 && "${wayland_display}" != /* ]]; then
+                sandbox_wayland_socket="${DEVBOX_TMPDIR}/${wayland_display}"
+            fi
+            bind_runtime_path_precreated "${wayland_socket}" "${sandbox_wayland_socket}"
+            add_sandbox_env_once XDG_RUNTIME_DIR "${runtime_dir}"
+            add_sandbox_env_once WAYLAND_DISPLAY "${wayland_display}"
+            info "Clipboard integration: exact Wayland socket forwarded"
+        fi
+    fi
+
+    case "${display_value}" in
+    :[0-9]* | unix:[0-9]*)
+        display_number="${display_value#*:}"
+        display_number="${display_number%%.*}"
+        x11_socket="/tmp/.X11-unix/X${display_number}"
+        if [[ -S "${x11_socket}" ]]; then
+            bind_runtime_path_precreated "${x11_socket}" "${x11_socket}"
+            add_sandbox_env_once DISPLAY "${display_value}"
+            xauthority_path="${XAUTHORITY:-${HOST_HOME}/.Xauthority}"
+            if [[ -e "${xauthority_path}" ]]; then
+                map_host_path_to_sandbox "${xauthority_path}"
+                sandbox_xauthority="${REPLY}"
+                opt_ro_bind_path "${xauthority_path}" "${sandbox_xauthority}"
+                add_sandbox_env_once XAUTHORITY "${sandbox_xauthority}"
+            fi
+            info "Clipboard integration: exact X11 socket forwarded"
+        fi
+        ;;
+    esac
+}
+
+select_host_tool_home() {
+    local env_value="$1"
+    local preferred_path="$2"
+    local legacy_path="$3"
+
+    if [[ -n "${env_value}" ]]; then
+        REPLY="${env_value}"
+    elif [[ -d "${preferred_path}" || ! -d "${legacy_path}" ]]; then
+        REPLY="${preferred_path}"
+    else
+        REPLY="${legacy_path}"
+    fi
+}
+
+find_chromium_binary() {
+    local candidate
+    local -a candidates=()
+
+    [[ -n "${DEVBOX_CHROMIUM_BIN:-}" ]] && candidates+=("${DEVBOX_CHROMIUM_BIN}")
+    candidates+=(chromium google-chrome-stable google-chrome chrome)
+    for candidate in "${candidates[@]}"; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            command -v "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_devtools_endpoint_ready() {
+    if command -v curl >/dev/null 2>&1; then
+        curl --silent --show-error --fail "http://127.0.0.1:9222/json/version" >/dev/null 2>&1
+        return $?
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY' >/dev/null 2>&1
+import sys
+import urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=1):
+        pass
+except Exception:
+    sys.exit(1)
+PY
+        return $?
+    fi
+    return 1
+}
+
+ensure_chromium_devtools() {
+    local chromium_bin
+    local chromium_profile="${DEVBOX_CHROMIUM_PROFILE:-/tmp/devbox-chrome}"
+    local chromium_log="${DEVBOX_CHROMIUM_LOG:-/tmp/devbox-chromium.log}"
+    local attempt
+
+    if is_devtools_endpoint_ready; then
+        info "Chromium DevTools already available on 127.0.0.1:9222"
+        return 0
+    fi
+    chromium_bin="$(find_chromium_binary || true)"
+    if [[ -z "${chromium_bin}" ]]; then
+        error "web-developer mode could not find a Chromium-compatible browser"
+        error "set DEVBOX_CHROMIUM_BIN or install chromium/google-chrome"
+        return 1
+    fi
+
+    mkdir -p -- "${chromium_profile}"
+    info "Starting Chromium DevTools via ${chromium_bin}"
+    nohup "${chromium_bin}" \
+        --remote-debugging-port=9222 \
+        --user-data-dir="${chromium_profile}" \
+        --no-first-run \
+        --no-default-browser-check \
+        about:blank >"${chromium_log}" 2>&1 </dev/null &
+
+    for ((attempt = 1; attempt <= 20; attempt++)); do
+        is_devtools_endpoint_ready && return 0
+        sleep 0.5
+    done
+    error "Chromium launched but DevTools endpoint did not become ready"
+    error "check log: ${chromium_log}"
+    return 1
+}
+
+is_stale_workspace_env_name() {
+    local env_name="$1"
+
+    case "${env_name}" in
+    OPENCODE_API_KEY)
+        return 1
+        ;;
+    OPENCODE*)
+        return 0
+        ;;
+    NVIM_OPENCODE_PORT | NVIM_LOG_FILE | NVIM_THEME_COLOR | \
+        USER_PREFIX | TMUX_WORKSPACE_ROOT | GALACTICA_HOME | MYVIMRC)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+should_inherit_env() {
+    local env_name="$1"
+
+    is_stale_workspace_env_name "${env_name}" && return 1
+    if [[ "${ALLOW_AWS:-1}" -eq 0 && "${env_name}" == AWS_* ]]; then
+        return 1
+    fi
+    if [[ "${ALLOW_GUI:-0}" -eq 1 ]]; then
+        case "${env_name}" in
+        DISPLAY | WAYLAND_DISPLAY | XAUTHORITY | DBUS_SESSION_BUS_ADDRESS | SESSION_MANAGER)
+            return 0
+            ;;
+        esac
+    fi
+
+    case "${env_name}" in
+    HOME | PATH | PWD | OLDPWD | SHELL | SHLVL | _ | USER | LOGNAME | TERM | COLORTERM | LANG | LC_ALL | \
+        XDG_CONFIG_HOME | XDG_DATA_HOME | XDG_STATE_HOME | XDG_CACHE_HOME | \
+        EDITOR | VISUAL | PI_BIN | PI_CODING_AGENT_DIR | PI_SESSION_* | PI_PROVIDER | PI_MODEL | PI_REASONING_LEVEL | \
+        PI_*SOCKET* | DEVBOX_* | TMPDIR | GIT_OPTIONAL_LOCKS | SSH_AUTH_SOCK | \
+        GPG_AGENT_INFO | DBUS_SESSION_BUS_ADDRESS | SESSION_MANAGER | XAUTHORITY | DISPLAY | WAYLAND_DISPLAY | \
+        NVIM | NVIM_LISTEN_ADDRESS | TMUX | TMUX_PANE | \
+        PLAYWRIGHT_BROWSERS_PATH | MISE_SKIP_ACTIVATE | UV_LINK_MODE | PNPM_HOME | \
+        PYENV_ROOT | RUSTUP_HOME | CARGO_HOME | GOPATH | GOBIN | PYO3_PYTHON)
+        return 1
+        ;;
+    esac
+    return 0
+}
+
+inherit_safe_environment() {
+    local env_name
+    local env_output
+
+    env_output="$(compgen -e || true)"
+    while IFS= read -r env_name; do
+        if should_inherit_env "${env_name}" && [[ -n "${!env_name:-}" ]]; then
+            BWRAP_CMD+=(--setenv "${env_name}" "${!env_name}")
+        fi
+    done <<<"${env_output}"
+}
+
+preserve_pi_session_environment() {
+    local env_name
+    local env_output
+
+    env_output="$(compgen -e || true)"
+    while IFS= read -r env_name; do
+        case "${env_name}" in
+        PI_SESSION_* | PI_PROVIDER | PI_MODEL | PI_REASONING_LEVEL)
+            if [[ -n "${!env_name:-}" ]]; then
+                add_sandbox_env_once "${env_name}" "${!env_name}"
+            fi
+            ;;
+        esac
+    done <<<"${env_output}"
+}
+
+run_doctor() {
+    local status=0
+    local script_dir
+    local integrity_helper
+    local opencode_config="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}/opencode/opencode.json"
+    local opencode_packages="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}/opencode/packages"
+    local opencode_cache="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}/devbox/opencode/plugin-integrity-v1.bin"
+
+    printf 'devbox doctor: running comprehensive validation\n'
+    if run_devbox_validation; then
+        :
+    else
+        status=$?
+    fi
+
+    script_dir="${SCRIPT_DIR}"
+    integrity_helper="${script_dir}/devbox-opencode-integrity"
+    printf '\ndevbox doctor: checking current OpenCode configuration\n'
+    if [[ ! -x "${integrity_helper}" ]]; then
+        validation_fail "Doctor FAIL: missing OpenCode integrity helper (${integrity_helper})"
+        status=1
+    elif [[ "${EPHEMERAL_STATE}" -eq 1 ]] && \
+        DEVBOX_OPENCODE_INTEGRITY_NO_CACHE=1 "${integrity_helper}" "${opencode_config}" "${opencode_packages}" "${opencode_cache}"; then
+        validation_pass 'Doctor PASS: current OpenCode plugins are structurally loadable (uncached)'
+    elif [[ "${EPHEMERAL_STATE}" -eq 0 ]] && \
+        "${integrity_helper}" "${opencode_config}" "${opencode_packages}" "${opencode_cache}"; then
+        validation_pass 'Doctor PASS: current OpenCode plugins are structurally loadable'
+    else
+        validation_fail 'Doctor FAIL: current OpenCode plugin integrity check failed'
+        status=1
+    fi
+
+    printf '\ndevbox configuration summary\n'
+    printf '  sandbox: Bubblewrap only\n'
+    printf '  Pi state root: %s%s\n' "${PI_AGENT_DIR}" "$([[ "${PI_AGENT_DIR_FROM_ENV}" -eq 1 ]] && printf ' (from PI_CODING_AGENT_DIR)' || printf ' (Pi default)')"
+    printf '  target policy: writable by default with critical infrastructure read-only\n'
+    printf '  host tools: %s\n' "$([[ "${ALLOW_HOST_TOOLS}" -eq 1 ]] && printf enabled || printf disabled)"
+    printf '  AWS: %s\n' "$([[ "${ALLOW_AWS}" -eq 1 ]] && printf enabled || printf disabled)"
+    printf '  clipboard: %s\n' "$([[ "${ALLOW_CLIPBOARD}" -eq 1 ]] && printf enabled || printf disabled)"
+    printf '  network: %s\n' "$([[ "${SHARE_NETWORK}" -eq 1 ]] && printf shared || printf isolated)"
+    printf '  SSH agent forwarding: %s\n' "$([[ "${FORWARD_SSH_AGENT}" -eq 1 ]] && printf enabled || printf disabled)"
+    printf '  terminal sockets: %s\n' "$([[ "${ALLOW_TERMINAL_SOCKETS}" -eq 1 ]] && printf enabled || printf disabled)"
+    printf '  persistent development state: %s\n' "$([[ "${EPHEMERAL_STATE}" -eq 1 ]] && printf disabled || printf enabled)"
+    printf '  GUI access: %s\n' "$([[ "${ALLOW_GUI}" -eq 1 ]] && printf enabled || printf disabled)"
+    printf '  Pi resource assurance: read-only mounts plus real-loader validation\n'
+    printf '  OpenCode plugin assurance: structural preflight for direct and shell launches\n'
+
+    return "${status}"
+}
+
+validation_pass() {
+    printf '✅ %s\n' "$1"
+}
+
+validation_fail() {
+    printf '❌ %s\n' "$1"
+}
+
+validation_warn() {
+    printf '⚠️  %s\n' "$1"
+}
+
+run_devbox_validation() {
+    local script_path="$0"
+    local script_dir
+    local validation_root
+    local test_home
+    local test_project
+    local absolute_pi_package
+    local failed=0
+    local output
+    local expected_output
+    local command_status
+    local test_script
+
+    script_dir="${SCRIPT_DIR}"
+    validation_root="$(mktemp -d "${TMPDIR:-/tmp}/devbox-validation.XXXXXX")"
+    test_home="${validation_root}/home"
+    test_project="${validation_root}/project"
+    absolute_pi_package="${test_home}/projects/absolute-pi-package"
+    mkdir -p -- \
+        "${test_home}/.pi/agent/extensions" \
+        "${absolute_pi_package}" \
+        "${test_home}/.config/opencode" \
+        "${test_home}/.aws/sso/cache" \
+        "${test_home}/.aws/cli/cache" \
+        "${test_project}/.git" \
+        "${test_project}/.github"
+    printf '{"packages":["%s"]}\n' "${absolute_pi_package}" >"${test_home}/.pi/agent/settings.json"
+    printf '%s\n' '{"instructions":["existing-instruction.md"]}' >"${test_home}/.config/opencode/opencode.json"
+    printf '# Existing OpenCode instruction\n' >"${test_home}/.config/opencode/existing-instruction.md"
+    cat >"${test_home}/.pi/agent/extensions/devbox-validation.ts" <<'DEVBOX_EXTENSION'
+export default function (pi: any) {
+  pi.registerFlag("devbox-auto-extension-loaded", {
+    description: "devbox auto extension loaded",
+    type: "boolean",
+    default: false,
+  });
+}
+DEVBOX_EXTENSION
+    printf '%s\n' '{"name":"devbox-validation-package","pi":{"extensions":["./index.ts"]}}' \
+        >"${absolute_pi_package}/package.json"
+    cat >"${absolute_pi_package}/index.ts" <<'DEVBOX_PACKAGE'
+export default function (pi: any) {
+  pi.registerFlag("devbox-package-extension-loaded", {
+    description: "devbox package extension loaded",
+    type: "boolean",
+    default: false,
+  });
+}
+DEVBOX_PACKAGE
+    printf '[default]\nregion=us-east-1\n' >"${test_home}/.aws/config"
+    printf '[default]\naws_access_key_id=fixture\n' >"${test_home}/.aws/credentials"
+
+    printf 'devbox validation\n'
+    if command -v bwrap >/dev/null 2>&1; then
+        validation_pass "Test 0.1 PASS: bwrap found at $(command -v bwrap)"
+    else
+        validation_fail 'Test 0.1 FAIL: bwrap unavailable'
+        failed=$((failed + 1))
+    fi
+
+    if check_bwrap_namespace_support; then
+        validation_pass 'Test 0.2 PASS: bwrap namespace probe succeeded'
+
+        # shellcheck disable=SC2016 # HOME expands inside the sandboxed shell.
+        output="$(env -u SSH_AUTH_SOCK \
+            HOME="${test_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+            XDG_CONFIG_HOME="${test_home}/.config" XDG_DATA_HOME="${test_home}/.local/share" \
+            XDG_STATE_HOME="${test_home}/.local/state" XDG_CACHE_HOME="${test_home}/.cache" \
+            PATH="${PATH}" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+            DEVBOX_GIT="${DEVBOX_GIT:-${script_dir}/devbox-git}" \
+            DEVBOX_FORCE_PROBE=1 \
+            "${script_path}" /bin/bash --noprofile --norc -lc \
+            'printf workspace-ok > workspace.txt; cat "$HOME/.aws/config" >/dev/null; printf cache-ok > "$HOME/.aws/cli/cache/devbox"; printf opencode-ok > "$HOME/.config/opencode/devbox"; printf DEVBOX_LIVE_OK' \
+            -- "${test_project}" -q --no-host-tools --no-clipboard --no-ssh-agent 2>&1 || true)"
+        if [[ "${output}" == 'DEVBOX_LIVE_OK' ]] &&
+            [[ "$(<"${test_project}/workspace.txt")" == 'workspace-ok' ]] &&
+            [[ "$(<"${test_home}/.aws/cli/cache/devbox")" == 'cache-ok' ]] &&
+            [[ "$(<"${test_home}/.config/opencode/devbox")" == 'opencode-ok' ]]; then
+            validation_pass 'Test A.1 PASS: command-first execution, target writes, AWS, and OpenCode state work live'
+        else
+            validation_fail "Test A.1 FAIL: live unified-box behavior failed (${output})"
+            failed=$((failed + 1))
+        fi
+
+        # shellcheck disable=SC2016 # HOME/AWS_PROFILE expand inside the sandboxed shell.
+        output="$(env -u SSH_AUTH_SOCK AWS_PROFILE=fixture \
+            HOME="${test_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+            XDG_CONFIG_HOME="${test_home}/.config" XDG_DATA_HOME="${test_home}/.local/share" \
+            XDG_STATE_HOME="${test_home}/.local/state" XDG_CACHE_HOME="${test_home}/.cache" \
+            PATH="${PATH}" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+            DEVBOX_GIT="${DEVBOX_GIT:-${script_dir}/devbox-git}" \
+            DEVBOX_FORCE_PROBE=1 \
+            "${script_path}" /bin/bash --noprofile --norc -lc \
+            'test ! -e "$HOME/.aws" && test -z "${AWS_PROFILE:-}" && printf HARDENED_OK' \
+            -- "${test_project}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent 2>&1 || true)"
+        if [[ "${output}" == 'HARDENED_OK' ]]; then
+            validation_pass 'Test A.2 PASS: --no-aws hides AWS files and environment'
+        else
+            validation_fail "Test A.2 FAIL: --no-aws hardening failed (${output})"
+            failed=$((failed + 1))
+        fi
+
+        if command -v pi >/dev/null 2>&1; then
+            if output="$(env -u PI_CODING_AGENT_DIR -u SSH_AUTH_SOCK \
+                HOME="${test_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+                XDG_CONFIG_HOME="${test_home}/.config" XDG_DATA_HOME="${test_home}/.local/share" \
+                XDG_STATE_HOME="${test_home}/.local/state" XDG_CACHE_HOME="${test_home}/.cache" \
+                PATH="${PATH}" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+                DEVBOX_GIT="${DEVBOX_GIT:-${script_dir}/devbox-git}" \
+                DEVBOX_FORCE_PROBE=1 \
+                "${script_path}" pi --help -- "${test_project}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent 2>&1)"; then
+                command_status=0
+            else
+                command_status=$?
+            fi
+            if [[ "${command_status}" -eq 0 && "${output}" == *--devbox-auto-extension-loaded* && "${output}" == *--devbox-package-extension-loaded* ]]; then
+                validation_pass 'Test A.3 PASS: real Pi loads global extensions and settings packages'
+            else
+                validation_fail "Test A.3 FAIL: real Pi resource loading failed (status=${command_status}; ${output})"
+                failed=$((failed + 1))
+            fi
+        else
+            validation_warn 'Test A.3 SKIP: Pi unavailable'
+        fi
+
+        if command -v opencode >/dev/null 2>&1; then
+            expected_output="$(opencode --version 2>&1)"
+            if output="$(env -u SSH_AUTH_SOCK \
+                HOME="${test_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+                XDG_CONFIG_HOME="${test_home}/.config" XDG_DATA_HOME="${test_home}/.local/share" \
+                XDG_STATE_HOME="${test_home}/.local/state" XDG_CACHE_HOME="${test_home}/.cache" \
+                PATH="${PATH}" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+                DEVBOX_GIT="${DEVBOX_GIT:-${script_dir}/devbox-git}" \
+                DEVBOX_FORCE_PROBE=1 \
+                "${script_path}" opencode --version -- "${test_project}" -q --no-aws --no-clipboard --no-ssh-agent 2>&1)"; then
+                command_status=0
+            else
+                command_status=$?
+            fi
+            if [[ "${command_status}" -eq 0 && -n "${expected_output}" && "${output}" == "${expected_output}" ]]; then
+                validation_pass 'Test A.4 PASS: real OpenCode launches and returns its exact host version'
+            else
+                validation_fail "Test A.4 FAIL: real OpenCode launch failed (status=${command_status}; expected=${expected_output}; actual=${output})"
+                failed=$((failed + 1))
+            fi
+
+            if output="$(env -u SSH_AUTH_SOCK \
+                HOME="${test_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+                XDG_CONFIG_HOME="${test_home}/.config" XDG_DATA_HOME="${test_home}/.local/share" \
+                XDG_STATE_HOME="${test_home}/.local/state" XDG_CACHE_HOME="${test_home}/.cache" \
+                PATH="${PATH}" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+                DEVBOX_GIT="${DEVBOX_GIT:-${script_dir}/devbox-git}" \
+                DEVBOX_FORCE_PROBE=1 \
+                "${script_path}" opencode debug config --pure -- "${test_project}" -q \
+                --no-aws --no-clipboard --no-ssh-agent 2>/dev/null)" && \
+                jq -e '.instructions as $instructions | (($instructions | index("existing-instruction.md")) != null and ($instructions | index("/devbox/agent-context.md")) != null)' \
+                    <<<"${output}" >/dev/null; then
+                validation_pass 'Test A.5 PASS: OpenCode appends sandbox-only Devbox agent instructions'
+            else
+                validation_fail "Test A.5 FAIL: OpenCode did not append Devbox agent instructions (${output})"
+                failed=$((failed + 1))
+            fi
+        else
+            validation_warn 'Test A.4 SKIP: OpenCode unavailable'
+            validation_warn 'Test A.5 SKIP: OpenCode unavailable'
+        fi
+    else
+        validation_fail 'Test 0.2 FAIL: bwrap namespace probe failed'
+        failed=$((failed + 1))
+    fi
+
+    for test_script in \
+        "${script_dir}/test/devbox-live-test" \
+        "${script_dir}/test/devbox-live-extended-test" \
+        "${script_dir}/test/devbox-static-test" \
+        "${script_dir}/test/devbox-agent-context-test" \
+        "${script_dir}/test/devbox-pi-state-test" \
+        "${script_dir}/test/devbox-pi-parity-test" \
+        "${script_dir}/test/devbox-pty-test" \
+        "${script_dir}/test/devbox-cache-test" \
+        "${script_dir}/test/devbox-git-identity-test" \
+        "${script_dir}/test/devbox-git-policy-test" \
+        "${script_dir}/test/devbox-parser-test" \
+        "${script_dir}/test/devbox-opencode-integrity-test" \
+        "${script_dir}/test/devbox-opencode-preflight-test"; do
+        printf '\n--- %s ---\n' "$(basename "${test_script}")"
+        if [[ ! -x "${test_script}" ]]; then
+            validation_fail "Test X.$(basename "${test_script}") FAIL: test is missing or not executable"
+            failed=$((failed + 1))
+        elif "${test_script}"; then
+            validation_pass "Test X.$(basename "${test_script}") PASS"
+        else
+            command_status=$?
+            validation_fail "Test X.$(basename "${test_script}") FAIL: exited with status ${command_status}"
+            failed=$((failed + 1))
+        fi
+    done
+
+    rm -rf -- "${validation_root}"
+    if [[ "${failed}" -eq 0 ]]; then
+        printf '🎉 All devbox validation tests passed!\n'
+        return 0
+    fi
+    printf '⚠️  %s devbox validation test(s) failed\n' "${failed}"
+    return 1
+}
+
+if [[ $# -eq 1 ]]; then
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    -V | --version)
+        version
+        exit 0
+        ;;
+    esac
+fi
+
+# -------- defaults --------
+FS_MODE="${DEVBOX_FS_MODE:-rw}"
+QUIET=0
+VERBOSE=0
+VALIDATE_MODE=0
+DOCTOR_MODE=0
+ALLOW_GIT=1
+ALLOW_INFRA=0
+ALLOW_PI_CONFIG=0
+ALLOW_HOST_TOOLS="${DEVBOX_HOST_TOOLS:-1}"
+ALLOW_HOST_TOOLS_SET=0
+ALLOW_HOST_TOOLS_DISABLE_SET=0
+ALLOW_GUI=0
+WEB_DEVELOPER_MODE=0
+ALLOW_NVIM_REMOTE="${DEVBOX_NVIM_REMOTE:-1}"
+ALLOW_TERMINAL_SOCKETS="${DEVBOX_TERMINAL_SOCKETS:-1}"
+ALLOW_AWS="${DEVBOX_AWS:-1}"
+ALLOW_CLIPBOARD="${DEVBOX_CLIPBOARD:-1}"
+SHARE_NETWORK="${DEVBOX_NETWORK:-1}"
+FORWARD_SSH_AGENT="${DEVBOX_SSH_AGENT:-0}"
+RESTRICT_DEV=1
+LOCKED_MODE=0
+EPHEMERAL_STATE=0
+RO_SET=0
+RW_SET=0
+DEVBOX_PARSE_MODE=0
+HOST_HOME="${HOME}"
+HOST_USER="${USER:-andres}"
+HOST_LOGNAME="${LOGNAME:-${HOST_USER}}"
+DEVBOX_TRACE_STARTUP_STARTED=0
+DEVBOX_TRACE_STARTUP_LAST=0
+declare -A DEVBOX_CACHE_READ_SNAPSHOT=()
+DEVBOX_CACHE_DIR=""
+DEVBOX_DISCOVERY_CACHE=""
+DEVBOX_DISCOVERY_CACHE_VALID=0
+DEVBOX_CACHE_BWRAP_PATH=""
+DEVBOX_CACHE_BWRAP_VERSION=""
+BWRAP_DISABLE_USERNS_SUPPORTED=0
+ACTIVE_PTY_PATH=""
+DEVBOX_EDITOR_RUNTIME_SHARED=0
+DEVBOX_EDITOR_RUNTIME_BASE=""
+DEVBOX_INTERNAL_TMPDIR=""
+
+trace_startup "defaults initialized"
+PI_AGENT_DIR_FROM_ENV=0
+if [[ -n "${PI_CODING_AGENT_DIR:-}" ]]; then
+    PI_AGENT_DIR="${PI_CODING_AGENT_DIR}"
+    PI_AGENT_DIR_FROM_ENV=1
+else
+    PI_AGENT_DIR="${HOST_HOME}/.pi/agent"
+fi
+
+PROJECT_TARGET=""
+PROJECT_DIR=""
+PROJECT_SOURCE_DIR=""
+PROJECT_ALIAS_DIR=""
+TARGET_KIND=""
+TARGET_PATH=""
+TARGET_SOURCE_PATH=""
+TARGET_PARENT_DIR=""
+TARGET_SOURCE_PARENT_DIR=""
+INVOCATION_CWD=""
+SANDBOX_PROJECT_ROOT=""
+SANDBOX_WORKDIR=""
+FILE_MODE_TMP_DIR=""
+FILE_MODE_PARENT_DIR=""
+FILE_MODE_TARGET_PATH=""
+FILE_MODE_RO_SOURCE_SANDBOX_PATH=""
+FILE_MODE_BINDS=()
+DEVBOX_COMMAND=()
+DEVBOX_ARGS=()
+RAW_COMMAND=()
+ADD_RO_PATHS=()
+ADD_RW_PATHS=()
+CARGO_PATH_DEPENDENCY_DIRS=()
+EXTRA_BINDS=()
+EXTRA_DIRS=()
+PI_BINDS=()
+SAFE_BINDS=()
+SANDBOX_ENVS=()
+SSH_SYSTEM_CONFIG_ARGS=()
+SSH_USER_CONFIG_ARGS=()
+SSH_CLIENT_FDS=()
+PI_AGENT_STATE_SOURCE_ROOT=""
+PI_AGENT_STATE_IS_INDEPENDENT=0
+PI_AGENT_SESSION_SOURCE_DIR=""
+PI_COMMAND_DIRECT=0
+declare -A EXTRA_DIR_SET=()
+declare -A PARENT_DIR_EXPANSION_SET=()
+declare -A EXTRA_BIND_DEST_SET=()
+declare -A EXPLICIT_BIND_DEST_SET=()
+declare -A SANDBOX_ENV_SET=()
+declare -A CARGO_PATH_DEPENDENCY_SET=()
+
+trap cleanup_file_mode_tmp_dir EXIT
+
+# Pi writable runtime/state is intentionally narrow. One canonical closure
+# preserves the logical agent path, assembles at its resolved destination, and
+# is applied after project binds so a parent or alias mount cannot hide it.
+# Direct startup locks live on the disposable tmpfs root; selected child state
+# persists through validated machine-local writable binds; existing credentials
+# persist through one exact writable bind. Other configuration and package source
+# remain read-only unless --allow-pi-config is explicit; that option never
+# replaces machine-local state or trust isolation.
+PI_AGENT_STATE_SUBDIRS=(
+    checkpoints
+    tasks
+    status
+    todos
+    plans
+    jobs
+    runs
+    ui
+    statusline
+    sessions
+    auth
+    trust
+    models
+    metadata
+    cache
+    git
+    projects
+    workspaces
+    providers
+    state
+)
+# TODO(devbox-plugin-integrity): validate Pi extensions/packages before startup,
+# including symlink containment, manifests, entry points, and a private fingerprint cache.
+PI_AGENT_RO_PATHS=(
+    agents
+    config-backups
+    extension-settings
+    extensions
+    npm
+    packages
+    prompts
+    scripts
+    skills
+    taskflows
+    themes
+)
+PI_AGENT_ROOT_CONFIG_FILES=(
+    AGENTS.md
+    settings.json
+    keybindings.json
+    fancy-footer.json
+    galactica-status.json
+    mcp.json
+    mcp-cache.json
+    pi-atelier.json
+    pi-statusline.json
+    models-store.json
+)
+PI_AGENT_CREDENTIAL_FILES=(
+    auth.json
+)
+
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "---" && "${DEVBOX_PARSE_MODE}" -eq 0 ]]; then
+        DEVBOX_COMMAND+=(--)
+        shift
+        continue
+    fi
+    if [[ "$1" == "--" && "${DEVBOX_PARSE_MODE}" -eq 0 ]]; then
+        DEVBOX_PARSE_MODE=1
+        shift
+        continue
+    fi
+    if [[ "${DEVBOX_PARSE_MODE}" -eq 0 ]]; then
+        DEVBOX_COMMAND+=("$1")
+    else
+        DEVBOX_ARGS+=("$1")
+    fi
+    shift
+done
+
+RAW_COMMAND=("${DEVBOX_COMMAND[@]}")
+set -- "${DEVBOX_ARGS[@]}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    -V | --version)
+        version
+        exit 0
+        ;;
+    -a | --add)
+        if [[ $# -lt 2 ]]; then error "missing argument for $1"; exit 1; fi
+        ADD_RO_PATHS+=("$2")
+        shift 2
+        ;;
+    -A | --add-rw)
+        if [[ $# -lt 2 ]]; then error "missing argument for $1"; exit 1; fi
+        ADD_RW_PATHS+=("$2")
+        shift 2
+        ;;
+    -q | --quiet)
+        QUIET=1
+        shift
+        ;;
+    -v | --verbose)
+        VERBOSE=1
+        shift
+        ;;
+    --backend)
+        if [[ $# -lt 2 ]]; then error "missing argument for --backend"; exit 1; fi
+        if [[ "$2" != "bwrap" ]]; then error "devbox supports only the bwrap backend"; exit 1; fi
+        shift 2
+        ;;
+    --backend=bwrap)
+        shift
+        ;;
+    --backend=*)
+        error "devbox supports only the bwrap backend"
+        exit 1
+        ;;
+    --doctor | --docotr)
+        DOCTOR_MODE=1
+        shift
+        ;;
+    --validate)
+        VALIDATE_MODE=1
+        shift
+        ;;
+    --ro)
+        RO_SET=1
+        FS_MODE="ro"
+        shift
+        ;;
+    --rw)
+        RW_SET=1
+        FS_MODE="rw"
+        shift
+        ;;
+    --allow-git)
+        ALLOW_GIT=1
+        shift
+        ;;
+    --allow-infra)
+        ALLOW_INFRA=1
+        shift
+        ;;
+    --allow-pi-config)
+        ALLOW_PI_CONFIG=1
+        shift
+        ;;
+    --allow-host-tools)
+        ALLOW_HOST_TOOLS=1
+        ALLOW_HOST_TOOLS_SET=1
+        shift
+        ;;
+    --no-host-tools)
+        ALLOW_HOST_TOOLS=0
+        ALLOW_HOST_TOOLS_DISABLE_SET=1
+        shift
+        ;;
+    --locked)
+        LOCKED_MODE=1
+        EPHEMERAL_STATE=1
+        FS_MODE=ro
+        RO_SET=1
+        ALLOW_HOST_TOOLS=0
+        ALLOW_HOST_TOOLS_DISABLE_SET=1
+        ALLOW_INFRA=0
+        ALLOW_PI_CONFIG=0
+        RESTRICT_DEV=1
+        ALLOW_AWS=0
+        ALLOW_CLIPBOARD=0
+        SHARE_NETWORK=0
+        FORWARD_SSH_AGENT=0
+        ALLOW_GUI=0
+        ALLOW_NVIM_REMOTE=0
+        ALLOW_TERMINAL_SOCKETS=0
+        shift
+        ;;
+    --aws)
+        ALLOW_AWS=1
+        shift
+        ;;
+    --no-aws)
+        ALLOW_AWS=0
+        shift
+        ;;
+    --clipboard)
+        ALLOW_CLIPBOARD=1
+        shift
+        ;;
+    --no-clipboard)
+        ALLOW_CLIPBOARD=0
+        shift
+        ;;
+    --no-network)
+        SHARE_NETWORK=0
+        shift
+        ;;
+    --no-nvim-remote)
+        ALLOW_NVIM_REMOTE=0
+        shift
+        ;;
+    --no-terminal-sockets)
+        ALLOW_NVIM_REMOTE=0
+        ALLOW_TERMINAL_SOCKETS=0
+        shift
+        ;;
+    -g | --allow-gui)
+        ALLOW_GUI=1
+        shift
+        ;;
+    -s | --ssh-agent)
+        FORWARD_SSH_AGENT=1
+        shift
+        ;;
+    --no-ssh-agent)
+        FORWARD_SSH_AGENT=0
+        shift
+        ;;
+    -w | --web-developer)
+        WEB_DEVELOPER_MODE=1
+        ALLOW_GUI=1
+        shift
+        ;;
+    --full-dev)
+        RESTRICT_DEV=0
+        shift
+        ;;
+    -*)
+        error "unknown option: $1"
+        echo "Try '${PROGRAM_NAME} --help' for more information." >&2
+        exit 1
+        ;;
+    *)
+        if [[ -z "${PROJECT_TARGET}" ]]; then
+            PROJECT_TARGET="$1"
+        else
+            error "unexpected devbox argument after target: $1"
+            exit 1
+        fi
+        shift
+        ;;
+    esac
+done
+
+if [[ "${LOCKED_MODE}" -eq 1 ]]; then
+    EPHEMERAL_STATE=1
+    FS_MODE=ro
+    RO_SET=1
+    ALLOW_HOST_TOOLS=0
+    ALLOW_HOST_TOOLS_DISABLE_SET=1
+    ALLOW_INFRA=0
+    ALLOW_PI_CONFIG=0
+    RESTRICT_DEV=1
+    ALLOW_AWS=0
+    ALLOW_CLIPBOARD=0
+    SHARE_NETWORK=0
+    FORWARD_SSH_AGENT=0
+    ALLOW_GUI=0
+    ALLOW_NVIM_REMOTE=0
+    ALLOW_TERMINAL_SOCKETS=0
+fi
+
+if [[ "${VALIDATE_MODE}" -eq 1 ]]; then
+    run_devbox_validation
+    exit $?
+fi
+if [[ "${DOCTOR_MODE}" -eq 1 ]]; then
+    run_doctor
+    exit $?
+fi
+
+init_discovery_cache
+trace_startup "discovery cache initialized"
+
+if [[ ${#RAW_COMMAND[@]} -eq 0 ]]; then
+    RAW_COMMAND=("${DEVBOX_SHELL:-zsh}" -l)
+fi
+
+if [[ "${RO_SET}" -eq 1 && "${RW_SET}" -eq 1 ]]; then
+    error "--ro and --rw are mutually exclusive"
+    exit 1
+fi
+if [[ "${ALLOW_HOST_TOOLS_SET}" -eq 1 && "${ALLOW_HOST_TOOLS_DISABLE_SET}" -eq 1 ]]; then
+    error "--allow-host-tools and --no-host-tools are mutually exclusive"
+    exit 1
+fi
+if [[ "${FS_MODE}" != "ro" && "${FS_MODE}" != "rw" ]]; then
+    error "invalid FS mode '${FS_MODE}' (expected 'ro' or 'rw')"
+    exit 1
+fi
+if [[ ! -r "${DEVBOX_AGENT_CONTEXT_HOST}" ]]; then
+    error "agent context file not found or unreadable: ${DEVBOX_AGENT_CONTEXT_HOST}"
+    exit 1
+fi
+for boolean_value in "${ALLOW_HOST_TOOLS}" "${ALLOW_NVIM_REMOTE}" "${ALLOW_TERMINAL_SOCKETS}" "${ALLOW_AWS}" \
+    "${ALLOW_CLIPBOARD}" "${SHARE_NETWORK}" "${FORWARD_SSH_AGENT}"; do
+    if [[ "${boolean_value}" != 0 && "${boolean_value}" != 1 ]]; then
+        error "devbox feature defaults must be 0 or 1"
+        exit 1
+    fi
+done
+if [[ -z "${PROJECT_TARGET}" ]]; then
+    PROJECT_TARGET="${PWD}"
+fi
+
+# TODO(macOS-sandbox-exec): Add a native macOS sandbox-exec backend after
+# extracting the mount, environment, and security policy from BWRAP_CMD. Preserve
+# fail-closed conflicts, read-only resources, locked mode, and backend live tests.
+if [[ "$(uname -s 2>/dev/null || printf unknown)" != "Linux" ]]; then
+    error "Bubblewrap requires Linux"
+    exit 1
+fi
+if ! command -v bwrap >/dev/null 2>&1; then
+    error "bubblewrap (bwrap) not found in PATH"
+    error "install bubblewrap before running devbox"
+    exit 1
+fi
+
+DEVBOX_CACHE_BWRAP_PATH="$(command -v bwrap)"
+DEVBOX_CACHE_BWRAP_VERSION="$(bwrap --version 2>/dev/null || printf unknown)"
+if ! is_discovery_cache_current "${DEVBOX_CACHE_BWRAP_PATH}" "${DEVBOX_CACHE_BWRAP_VERSION}"; then
+    DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED=""
+    DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT=""
+    DEVBOX_CACHE_REAL_GIT_HOST=""
+    DEVBOX_CACHE_REAL_GIT_REALPATH=""
+    DEVBOX_CACHE_DEVBOX_GIT_HOST=""
+    DEVBOX_CACHE_DEVBOX_GIT_REALPATH=""
+fi
+if is_discovery_cache_current "${DEVBOX_CACHE_BWRAP_PATH}" "${DEVBOX_CACHE_BWRAP_VERSION}" &&
+    [[ -n "${DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED:-}" ]]; then
+    BWRAP_DISABLE_USERNS_SUPPORTED="${DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED}"
+    trace_startup "bwrap capability cache hit"
+else
+    BWRAP_DISABLE_USERNS_SUPPORTED=0
+    if bwrap --help 2>/dev/null | grep -q -- "--disable-userns"; then
+        BWRAP_DISABLE_USERNS_SUPPORTED=1
+    fi
+    DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED="${BWRAP_DISABLE_USERNS_SUPPORTED}"
+    write_discovery_cache
+    trace_startup "bwrap capabilities discovered"
+fi
+
+if is_discovery_cache_current "${DEVBOX_CACHE_BWRAP_PATH}" "${DEVBOX_CACHE_BWRAP_VERSION}" &&
+    [[ "${DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT:-}" == "ok" ]]; then
+    trace_startup "bwrap namespace probe cache hit"
+else
+    check_bwrap_namespace_support || exit 1
+    if [[ "${DEVBOX_FORCE_PROBE:-0}" != "1" ]]; then
+        DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT=ok
+        write_discovery_cache
+    fi
+    trace_startup "bwrap namespace probe completed"
+fi
+
+if [[ "${RAW_COMMAND[0]##*/}" == "pi" ]]; then
+    PI_COMMAND_DIRECT=1
+    PI_BIN="${RAW_COMMAND[0]}"
+    discover_pi_binary
+    RAW_COMMAND[0]="${PI_BIN_SANDBOX}"
+else
+    prepare_command_binary
+fi
+apply_nvim_opencode_port_default
+run_opencode_plugin_preflight || exit 1
+discover_git_wrapper
+trace_startup "tool discovery completed"
+
+if [[ "${WEB_DEVELOPER_MODE}" -eq 1 ]]; then
+    ensure_chromium_devtools || exit 1
+fi
+if [[ "${FORWARD_SSH_AGENT}" -eq 1 && -n "${SSH_AUTH_SOCK:-}" && ! -S "${SSH_AUTH_SOCK}" ]]; then
+    error "SSH_AUTH_SOCK is not a socket: ${SSH_AUTH_SOCK}"
+    exit 1
+fi
+
+resolve_target_mode "${PROJECT_TARGET}"
+if [[ "${TARGET_KIND}" == "dir" && "${TARGET_SOURCE_PATH}" == "/" && "${FS_MODE}" != "ro" ]]; then
+    error "refusing to mount the host root writable; use --ro or select a narrower target"
+    exit 1
+fi
+INVOCATION_CWD="$(realpath "${PWD}")"
+if [[ "${TARGET_KIND}" == "dir" ]]; then
+    if [[ "${TARGET_PATH}" != "${TARGET_SOURCE_PATH}" ]]; then
+        PROJECT_DIR="${TARGET_SOURCE_PATH}"
+        PROJECT_ALIAS_DIR="${TARGET_PATH}"
+    else
+        PROJECT_DIR="${TARGET_PATH}"
+    fi
+    PROJECT_SOURCE_DIR="${TARGET_SOURCE_PATH}"
+    SANDBOX_PROJECT_ROOT="${PROJECT_DIR}"
+    SANDBOX_WORKDIR="${PROJECT_DIR}"
+else
+    PROJECT_DIR="${TARGET_PARENT_DIR}"
+    PROJECT_SOURCE_DIR="${TARGET_SOURCE_PARENT_DIR}"
+    SANDBOX_PROJECT_ROOT="${PROJECT_DIR}"
+    SANDBOX_WORKDIR="${INVOCATION_CWD}"
+fi
+cargo_workspace_expand_target
+
+SANDBOX_HOME="${HOST_HOME}"
+SANDBOX_LOCAL_DIR="${SANDBOX_HOME}/.local"
+SANDBOX_LOCAL_SHARE_DIR="${SANDBOX_LOCAL_DIR}/share"
+SANDBOX_LOCAL_STATE_DIR="${SANDBOX_LOCAL_DIR}/state"
+SANDBOX_CONFIG_DIR="${SANDBOX_HOME}/.config"
+SANDBOX_CACHE_DIR="${SANDBOX_HOME}/.cache"
+SANDBOX_BUN_HOME="${SANDBOX_HOME}/.bun"
+SANDBOX_PNPM_HOME="${SANDBOX_LOCAL_SHARE_DIR}/pnpm"
+SANDBOX_PLAYWRIGHT_BROWSERS_CACHE="${SANDBOX_CACHE_DIR}/ms-playwright"
+SANDBOX_EDITOR="v_quickedit_hover"
+NVIM_EDITOR_SCRIPT="${HOST_HOME}/.config/nvim/scripts/opencode-editor"
+SANDBOX_NVIM_EDITOR="${SANDBOX_HOME}/.config/nvim/scripts/opencode-editor"
+DEVBOX_INTERNAL_TMPDIR="/tmp/devbox-internal-$$"
+DEVBOX_TMPDIR="/tmp/devbox-$$"
+prepare_nvim_editor_runtime
+
+PI_AGENT_DIR_REAL="$(realpath -m "${PI_AGENT_DIR}")"
+map_host_path_to_sandbox "${PI_AGENT_DIR}"
+SANDBOX_PI_AGENT_DIR="${REPLY}"
+# Assemble at the physical target while PI_CODING_AGENT_DIR keeps the logical
+# path Pi and its packages expect. For a whole-directory symlink, ~/.pi retains
+# that symlink and resolves into this precreated assembly mount.
+map_host_path_to_sandbox "${PI_AGENT_DIR_REAL}"
+SANDBOX_PI_AGENT_ASSEMBLY_DIR="${REPLY}"
+
+if [[ "${TARGET_KIND}" == "file" || "${FS_MODE}" == "ro" ]]; then
+    PROJECT_BIND_FLAG="--ro-bind"
+    PROJECT_TOOL_BIND_FLAG="--ro-bind"
+else
+    PROJECT_BIND_FLAG="--bind"
+    PROJECT_TOOL_BIND_FLAG="--bind"
+fi
+
+SANDBOX_PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:/usr/bin/site_perl"
+SANDBOX_PATH="${SANDBOX_HOME}/.opencode/bin:${SANDBOX_BUN_HOME}/bin:${SANDBOX_PNPM_HOME}:${SANDBOX_PNPM_HOME}/bin:${SANDBOX_PATH}"
+
+if [[ "${ALLOW_HOST_TOOLS}" -eq 1 ]]; then
+    info "Binding host development tools"
+    if [[ -d "${HOST_HOME}/.local/bin" ]]; then
+        resolve_bind_source_path "${HOST_HOME}/.local/bin"
+        EXTRA_BINDS+=(--ro-bind "${REPLY}" "${SANDBOX_HOME}/.local/bin")
+        SANDBOX_PATH="${SANDBOX_HOME}/.local/bin:${SANDBOX_PATH}"
+    fi
+
+    HOST_RUNTIME_BIND_SUBPATHS=(
+        ".local/share/uv" ".cache/uv" ".npm" ".cache/npm" ".cache/node"
+        ".local/share/pnpm" ".cache/pnpm" ".krimto" ".cache/yarn"
+        ".cache/pip" ".cache/pipx" ".local/pipx" ".cache/sccache"
+        ".cache/go-build" ".hex" ".mix" ".cache/rebar3" ".cache/gleam"
+        ".local/share/gleam" ".deno" ".gradle" ".m2/repository"
+        ".nuget/packages" ".gem" ".bundle" ".cache/bundle"
+        ".composer" ".cache/composer"
+    )
+    for runtime_subpath in "${HOST_RUNTIME_BIND_SUBPATHS[@]}"; do
+        bind_runtime_dir "${HOST_HOME}/${runtime_subpath}" "${SANDBOX_HOME}/${runtime_subpath}"
+    done
+
+    if [[ -d "${HOST_HOME}/.pyenv" ]]; then
+        opt_ro_bind_dir "${HOST_HOME}/.pyenv" "${SANDBOX_HOME}/.pyenv"
+        SANDBOX_PATH="${SANDBOX_HOME}/.pyenv/shims:${SANDBOX_HOME}/.pyenv/bin:${SANDBOX_PATH}"
+        PYENV_ROOT_SANDBOX="${SANDBOX_HOME}/.pyenv"
+    fi
+
+    select_host_tool_home "${RUSTUP_HOME:-}" "${HOST_HOME}/.local/share/rustup" "${HOST_HOME}/.rustup"
+    HOST_RUSTUP_HOME="${REPLY}"
+    if [[ -d "${HOST_RUSTUP_HOME}" ]]; then
+        map_host_path_to_sandbox "${HOST_RUSTUP_HOME}"
+        RUSTUP_HOME_SANDBOX="${REPLY}"
+        opt_ro_bind_dir "${HOST_RUSTUP_HOME}" "${RUSTUP_HOME_SANDBOX}"
+    fi
+
+    select_host_tool_home "${CARGO_HOME:-}" "${HOST_HOME}/.local/share/cargo" "${HOST_HOME}/.cargo"
+    HOST_CARGO_HOME="${REPLY}"
+    map_host_path_to_sandbox "${HOST_CARGO_HOME}"
+    CARGO_HOME_SANDBOX="${REPLY}"
+    bind_runtime_dir "${HOST_CARGO_HOME}" "${CARGO_HOME_SANDBOX}"
+    SANDBOX_PATH="${CARGO_HOME_SANDBOX}/bin:${SANDBOX_PATH}"
+
+    select_host_tool_home "${GOPATH:-}" "${HOST_HOME}/.local/share/go" "${HOST_HOME}/go"
+    HOST_GOPATH="${REPLY}"
+    map_host_path_to_sandbox "${HOST_GOPATH}"
+    GOPATH_SANDBOX="${REPLY}"
+    bind_runtime_dir "${HOST_GOPATH}" "${GOPATH_SANDBOX}"
+    SANDBOX_PATH="${GOPATH_SANDBOX}/bin:${SANDBOX_PATH}"
+    if [[ -n "${GOBIN:-}" ]]; then
+        map_host_path_to_sandbox "${GOBIN}"
+        GOBIN_SANDBOX="${REPLY}"
+        SANDBOX_PATH="${GOBIN_SANDBOX}:${SANDBOX_PATH}"
+    fi
+fi
+trace_startup "host development tool binds prepared"
+
+assemble_pi_agent_resource_closure
+bind_pi_xdg_resources
+bind_user_openspec_schemas
+bind_nearest_project_openspec
+bind_opencode_state
+bind_appa_config
+bind_nvim_resources
+prepare_pi_command_guard
+prepare_opencode_command_guard
+bind_aws_integration
+
+opt_ro_bind_path "${HOST_HOME}/.gitconfig" "${SANDBOX_HOME}/.gitconfig"
+opt_ro_bind_path "${HOST_HOME}/.config/git/config" "${SANDBOX_HOME}/.config/git/config"
+if [[ "${ALLOW_NVIM_REMOTE}" -eq 1 && -f "${NVIM_EDITOR_SCRIPT}" ]]; then
+    opt_ro_bind_path "${NVIM_EDITOR_SCRIPT}" "${SANDBOX_NVIM_EDITOR}"
+    SANDBOX_EDITOR="${SANDBOX_NVIM_EDITOR}"
+    info "Neovim integration: using ${SANDBOX_NVIM_EDITOR} for EDITOR/VISUAL"
+fi
+RESOLV_CONF_TARGET="$(readlink -f /etc/resolv.conf 2>/dev/null || true)"
+if [[ -n "${RESOLV_CONF_TARGET}" && "${RESOLV_CONF_TARGET}" != "/etc/resolv.conf" && -f "${RESOLV_CONF_TARGET}" ]]; then
+    opt_ro_bind_path "${RESOLV_CONF_TARGET}" "${RESOLV_CONF_TARGET}"
+fi
+opt_ro_bind_path /run/systemd/resolve /run/systemd/resolve
+opt_ro_bind_path /run/dbus /run/dbus
+opt_ro_bind_path /run/NetworkManager /run/NetworkManager
+opt_ro_bind_path /var/run/nscd /var/run/nscd
+bind_terminal_integration
+bind_pi_socket_envs
+bind_clipboard_integration
+prepare_ssh_client_integration
+
+if [[ "${ALLOW_GUI}" -eq 1 ]]; then
+    info "Allowing GUI/session access"
+    [[ -d /tmp/.X11-unix ]] && opt_ro_bind_dir /tmp/.X11-unix /tmp/.X11-unix
+    if [[ -n "${XAUTHORITY:-}" && -e "${XAUTHORITY}" ]]; then
+        opt_ro_bind_path "${XAUTHORITY}" "${XAUTHORITY}"
+    elif [[ -f "${HOST_HOME}/.Xauthority" ]]; then
+        opt_ro_bind_path "${HOST_HOME}/.Xauthority" "${SANDBOX_HOME}/.Xauthority"
+    fi
+    if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" ]]; then
+        bind_runtime_dir "${XDG_RUNTIME_DIR}" "${XDG_RUNTIME_DIR}"
+    fi
+fi
+
+if [[ "${FORWARD_SSH_AGENT}" -eq 1 && -n "${SSH_AUTH_SOCK:-}" ]]; then
+    bind_runtime_path_precreated "${SSH_AUTH_SOCK}" "${SSH_AUTH_SOCK}"
+    add_sandbox_env_once SSH_AUTH_SOCK "${SSH_AUTH_SOCK}"
+    info "Forwarding SSH agent socket: ${SSH_AUTH_SOCK}"
+fi
+
+if [[ -d "${PROJECT_SOURCE_DIR}/.cargo/bin" ]]; then
+    EXTRA_BINDS+=("${PROJECT_TOOL_BIND_FLAG}" "${PROJECT_SOURCE_DIR}/.cargo/bin" "${SANDBOX_HOME}/.cargo/bin")
+    SANDBOX_PATH="${SANDBOX_HOME}/.cargo/bin:${SANDBOX_PATH}"
+fi
+if [[ -d "${PROJECT_SOURCE_DIR}/.venv/bin" ]]; then
+    EXTRA_BINDS+=("${PROJECT_TOOL_BIND_FLAG}" "${PROJECT_SOURCE_DIR}/.venv/bin" "${SANDBOX_PROJECT_ROOT}/.venv/bin")
+    SANDBOX_PATH="${SANDBOX_PROJECT_ROOT}/.venv/bin:${SANDBOX_PATH}"
+fi
+if [[ -d "${PROJECT_SOURCE_DIR}/node_modules/.bin" ]]; then
+    EXTRA_BINDS+=("${PROJECT_TOOL_BIND_FLAG}" "${PROJECT_SOURCE_DIR}/node_modules/.bin" "${SANDBOX_PROJECT_ROOT}/node_modules/.bin")
+    SANDBOX_PATH="${SANDBOX_PROJECT_ROOT}/node_modules/.bin:${SANDBOX_PATH}"
+fi
+if [[ -d "${PROJECT_SOURCE_DIR}/bin" && -f "${PROJECT_SOURCE_DIR}/go.mod" ]]; then
+    EXTRA_BINDS+=("${PROJECT_TOOL_BIND_FLAG}" "${PROJECT_SOURCE_DIR}/bin" "${SANDBOX_PROJECT_ROOT}/bin")
+    SANDBOX_PATH="${SANDBOX_PROJECT_ROOT}/bin:${SANDBOX_PATH}"
+fi
+trace_startup "runtime, GUI, SSH, and project tool binds prepared"
+
+if [[ "${TARGET_KIND}" == "file" ]] && ! is_path_within "${PROJECT_SOURCE_DIR}" "${INVOCATION_CWD}"; then
+    EXTRA_BINDS+=(--ro-bind "${INVOCATION_CWD}" "${INVOCATION_CWD}")
+fi
+if [[ -n "${PROJECT_ALIAS_DIR}" ]]; then
+    if [[ "${PROJECT_ALIAS_DIR}" == "${SANDBOX_PI_AGENT_DIR}" && \
+        "${PROJECT_SOURCE_DIR}" == "${PI_AGENT_DIR_REAL}" ]]; then
+        # ~/.pi already preserves this logical symlink. Binding its physical
+        # target onto the symlink itself is both redundant and invalid on some
+        # kernels; the primary project bind plus the later Pi closure is enough.
+        info "Pi integration: preserving the logical agent symlink without a project alias overlay"
+    else
+        add_prepared_bind_once "${PROJECT_BIND_FLAG}" "${PROJECT_SOURCE_DIR}" "${PROJECT_ALIAS_DIR}"
+    fi
+fi
+
+# Match devbox's effective target-root policy: Git metadata stays writable by
+# default, while critical build/repository infrastructure is protected unless
+# --allow-infra is explicit.
+PROTECTED_INFRA_DIRS=(
+    ".git"
+    ".github"
+    ".turbo"
+    ".cargo"
+)
+PROTECTED_INFRA_FILES=(
+    ".gitignore"
+    "package-lock.json"
+    "poetry.lock"
+    "Cargo.lock"
+    "pnpm-lock.yaml"
+    "yarn.lock"
+)
+
+if [[ "${ALLOW_INFRA}" -eq 0 ]]; then
+    for infra_dir in "${PROTECTED_INFRA_DIRS[@]}"; do
+        if [[ "${infra_dir}" == ".git" && "${ALLOW_GIT}" -eq 1 ]]; then
+            continue
+        fi
+        if [[ -d "${PROJECT_SOURCE_DIR}/${infra_dir}" ]]; then
+            SAFE_BINDS+=(--ro-bind "${PROJECT_SOURCE_DIR}/${infra_dir}" "${SANDBOX_PROJECT_ROOT}/${infra_dir}")
+            if [[ -n "${PROJECT_ALIAS_DIR}" ]]; then
+                SAFE_BINDS+=(--ro-bind "${PROJECT_SOURCE_DIR}/${infra_dir}" "${PROJECT_ALIAS_DIR}/${infra_dir}")
+            fi
+            info "Protecting ${infra_dir}/ (read-only)"
+        fi
+    done
+    for infra_file in "${PROTECTED_INFRA_FILES[@]}"; do
+        if [[ -f "${PROJECT_SOURCE_DIR}/${infra_file}" ]]; then
+            SAFE_BINDS+=(--ro-bind "${PROJECT_SOURCE_DIR}/${infra_file}" "${SANDBOX_PROJECT_ROOT}/${infra_file}")
+            if [[ -n "${PROJECT_ALIAS_DIR}" ]]; then
+                SAFE_BINDS+=(--ro-bind "${PROJECT_SOURCE_DIR}/${infra_file}" "${PROJECT_ALIAS_DIR}/${infra_file}")
+            fi
+            info "Protecting ${infra_file} (read-only)"
+        fi
+    done
+fi
+
+for added_path in "${ADD_RO_PATHS[@]}"; do
+    add_custom_bind --ro-bind "${added_path}"
+done
+for added_path in "${ADD_RW_PATHS[@]}"; do
+    add_custom_bind --bind "${added_path}"
+done
+
+# Skills homes can contain symlinked children (articles -> ~/articles) whose
+# targets exist only on the host. Bind each resolved target read-only at its
+# own canonical path so the links resolve naturally inside the sandbox. Running
+# after every project and custom bind keeps already-owned destinations intact;
+# running before Pi package resolution keeps the overlap guard effective.
+bind_skills_home_symlink_targets
+
+# Resolve user-configured absolute Pi packages only after every ordinary mount
+# destination is known. Their later PI_BINDS placement cannot then shadow an
+# earlier protected child without the overlap check rejecting the launch.
+bind_pi_absolute_local_packages
+
+discover_active_pty
+
+BWRAP_CMD=(
+    bwrap
+    --ro-bind /usr /usr
+    --ro-bind /bin /bin
+    --ro-bind /lib /lib
+)
+
+if [[ "${BWRAP_DISABLE_USERNS_SUPPORTED}" -eq 1 ]]; then
+    BWRAP_CMD=(bwrap --unshare-user "${BWRAP_CMD[@]:1}")
+    BWRAP_CMD+=(--disable-userns)
+else
+    BWRAP_CMD=(bwrap --unshare-user-try "${BWRAP_CMD[@]:1}")
+fi
+
+[[ -d /lib64 ]] && BWRAP_CMD+=(--ro-bind /lib64 /lib64)
+[[ -d /sys ]] && BWRAP_CMD+=(--ro-bind /sys /sys)
+BWRAP_CMD+=(--ro-bind /etc /etc)
+BWRAP_CMD+=("${SSH_SYSTEM_CONFIG_ARGS[@]}")
+BWRAP_CMD+=(
+    --ro-bind "${REAL_GIT_HOST}" /devbox/real-git
+    --ro-bind "${DEVBOX_GIT_HOST}" /usr/bin/git
+    --ro-bind "${DEVBOX_AGENT_CONTEXT_HOST}" "${DEVBOX_AGENT_CONTEXT_SANDBOX}"
+)
+
+if [[ "${SHARE_NETWORK}" -eq 0 ]]; then
+    BWRAP_CMD+=(--unshare-net)
+fi
+
+if [[ "${RESTRICT_DEV}" -eq 1 ]]; then
+    BWRAP_CMD+=(
+        --dev-bind /dev/null /dev/null
+        --dev-bind /dev/zero /dev/zero
+        --dev-bind /dev/random /dev/random
+        --dev-bind /dev/urandom /dev/urandom
+        --dev-bind /dev/tty /dev/tty
+        --tmpfs /dev/shm
+        --symlink /proc/self/fd /dev/fd
+        --symlink /proc/self/fd/0 /dev/stdin
+        --symlink /proc/self/fd/1 /dev/stdout
+        --symlink /proc/self/fd/2 /dev/stderr
+    )
+else
+    BWRAP_CMD+=(--dev /dev)
+fi
+if [[ "${RESTRICT_DEV}" -eq 1 && -n "${ACTIVE_PTY_PATH}" ]]; then
+    BWRAP_CMD+=(
+        --dir /dev/pts
+        --dev-bind "${ACTIVE_PTY_PATH}" "${ACTIVE_PTY_PATH}"
+    )
+fi
+
+BWRAP_CMD+=(
+    --proc /proc
+    --tmpfs /tmp
+    --dir "${DEVBOX_INTERNAL_TMPDIR}"
+    --chmod 0700 "${DEVBOX_INTERNAL_TMPDIR}"
+)
+if [[ "${DEVBOX_EDITOR_RUNTIME_SHARED}" -eq 0 ]]; then
+    BWRAP_CMD+=(
+        --dir "${DEVBOX_TMPDIR}"
+        --chmod 0700 "${DEVBOX_TMPDIR}"
+    )
+fi
+BWRAP_CMD+=(
+    --tmpfs /home
+    --dir "${SANDBOX_HOME}"
+    --dir "${SANDBOX_LOCAL_DIR}"
+    --dir "${SANDBOX_LOCAL_SHARE_DIR}"
+    --dir "${SANDBOX_LOCAL_STATE_DIR}"
+    --dir "${SANDBOX_CONFIG_DIR}"
+    --dir "${SANDBOX_CACHE_DIR}"
+)
+BWRAP_CMD+=("${EXTRA_DIRS[@]}")
+BWRAP_CMD+=("${SSH_USER_CONFIG_ARGS[@]}")
+if [[ "${SANDBOX_PROJECT_ROOT}" != "/" ]]; then
+    BWRAP_CMD+=(--dir "$(dirname "${SANDBOX_PROJECT_ROOT}")")
+    BWRAP_CMD+=(--dir "${SANDBOX_PROJECT_ROOT}")
+fi
+BWRAP_CMD+=("${EXTRA_BINDS[@]}")
+BWRAP_CMD+=("${PROJECT_BIND_FLAG}" "${PROJECT_SOURCE_DIR}" "${SANDBOX_PROJECT_ROOT}")
+if [[ "${TARGET_KIND}" == "file" && "${FS_MODE}" != "ro" ]]; then
+    prepare_single_file_overlay
+    BWRAP_CMD+=("${FILE_MODE_BINDS[@]}")
+fi
+# Pi binds deliberately follow every project and alias parent bind. Bubblewrap
+# applies mounts in argv order, so this is the boundary that prevents a selected
+# ~/.pi/agent target (or an ancestor) from shadowing the assembled Pi closure.
+BWRAP_CMD+=("${PI_BINDS[@]}")
+BWRAP_CMD+=("${SAFE_BINDS[@]}")
+
+BWRAP_CMD+=(
+    --chdir "${SANDBOX_WORKDIR}"
+    --die-with-parent
+    --clearenv
+)
+inherit_safe_environment
+preserve_pi_session_environment
+BWRAP_CMD+=("${SANDBOX_ENVS[@]}")
+BWRAP_CMD+=(
+    --setenv PATH "${SANDBOX_PATH}"
+    --setenv HOME "${SANDBOX_HOME}"
+    --setenv USER "${HOST_USER}"
+    --setenv LOGNAME "${HOST_LOGNAME}"
+    --setenv TERM "${TERM:-xterm-256color}"
+    --setenv COLORTERM "${COLORTERM:-truecolor}"
+    --setenv LANG "${LANG:-C.UTF-8}"
+    --setenv LC_ALL "${LC_ALL:-C.UTF-8}"
+    --setenv EDITOR "${SANDBOX_EDITOR}"
+    --setenv VISUAL "${SANDBOX_EDITOR}"
+    --setenv SHELL "${SHELL:-/bin/bash}"
+    --setenv GIT_OPTIONAL_LOCKS 0
+    --setenv DEVBOX_ACTIVE 1
+    --setenv DEVBOX_PROJECT_ROOT "${SANDBOX_PROJECT_ROOT}"
+    --setenv DEVBOX_AGENT_CONTEXT_FILE "${DEVBOX_AGENT_CONTEXT_SANDBOX}"
+    --setenv DEVBOX_FS_MODE "${FS_MODE}"
+    --setenv DEVBOX_NETWORK "${SHARE_NETWORK}"
+    --setenv DEVBOX_AWS "${ALLOW_AWS}"
+    --setenv DEVBOX_CLIPBOARD "${ALLOW_CLIPBOARD}"
+    --setenv DEVBOX_SSH_AGENT "${FORWARD_SSH_AGENT}"
+    --setenv DEVBOX_TERMINAL_SOCKETS "${ALLOW_TERMINAL_SOCKETS}"
+    --setenv DEVBOX_HOST_TOOLS "${ALLOW_HOST_TOOLS}"
+    --setenv DEVBOX_GIT_POLICY wrapped
+    --setenv DEVBOX_GIT_WRAPPER devbox-git
+    --setenv DEVBOX_GIT_PROGRAM_NAME devbox-git
+    --setenv DEVBOX_RUNTIME_NAME devbox
+    --setenv DEVBOX_REAL_GIT /devbox/real-git
+    --setenv TMPDIR "${DEVBOX_TMPDIR}"
+    --setenv PNPM_HOME "${SANDBOX_PNPM_HOME}"
+    --setenv PLAYWRIGHT_BROWSERS_PATH "${SANDBOX_PLAYWRIGHT_BROWSERS_CACHE}"
+    --setenv MISE_SKIP_ACTIVATE 1
+    --setenv UV_LINK_MODE copy
+    --setenv OPENSPEC_TELEMETRY 0
+)
+
+[[ -n "${PYENV_ROOT_SANDBOX:-}" ]] && BWRAP_CMD+=(--setenv PYENV_ROOT "${PYENV_ROOT_SANDBOX}")
+[[ -n "${RUSTUP_HOME_SANDBOX:-}" ]] && BWRAP_CMD+=(--setenv RUSTUP_HOME "${RUSTUP_HOME_SANDBOX}")
+[[ -n "${CARGO_HOME_SANDBOX:-}" ]] && BWRAP_CMD+=(--setenv CARGO_HOME "${CARGO_HOME_SANDBOX}")
+[[ -n "${GOPATH_SANDBOX:-}" ]] && BWRAP_CMD+=(--setenv GOPATH "${GOPATH_SANDBOX}")
+[[ -n "${GOBIN_SANDBOX:-}" ]] && BWRAP_CMD+=(--setenv GOBIN "${GOBIN_SANDBOX}")
+if [[ -n "${PYO3_PYTHON:-}" ]]; then
+    BWRAP_CMD+=(--setenv PYO3_PYTHON "${SANDBOX_WORKDIR}/.venv/bin/python")
+fi
+
+# Always pin Pi to the config tree that devbox mounted. Relying on Pi's homedir()
+# fallback inside a user namespace can resolve a different home than $HOME,
+# causing settings, packages, extensions, and themes to disappear silently.
+BWRAP_CMD+=(--setenv PI_CODING_AGENT_DIR "${SANDBOX_PI_AGENT_DIR}")
+
+BWRAP_CMD+=("${RAW_COMMAND[@]}")
+
+trace_startup "bwrap command built"
+info "Launching devbox Bubblewrap sandbox..."
+if [[ "${TARGET_KIND}" == "file" && "${FS_MODE}" != "ro" ]]; then
+    set +e
+    "${BWRAP_CMD[@]}"
+    BWRAP_STATUS=$?
+    set -e
+    if [[ "${BWRAP_STATUS}" -eq 0 ]]; then
+        sync_single_file_target_back || exit 1
+    fi
+    exit "${BWRAP_STATUS}"
+fi
+exec "${BWRAP_CMD[@]}"

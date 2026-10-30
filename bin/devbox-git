@@ -1,0 +1,652 @@
+#!/usr/bin/env bash
+
+# Policy-enforcing Git wrapper for Devbox-based sandboxes.
+# The invoking sandbox may supply its runtime identity and private real-Git path.
+
+set -Eeuo pipefail
+
+readonly PROGRAM_NAME="${DEVBOX_GIT_PROGRAM_NAME:-devbox-git}"
+readonly SANDBOX_NAME="${DEVBOX_RUNTIME_NAME:-devbox}"
+readonly PROGRAM_VERSION="0.1.0"
+
+error() {
+    printf '%s: %s\n' "${PROGRAM_NAME}" "$*" >&2
+}
+
+emit_denial_lines() {
+    local -a lines=("$@")
+    printf '%s\n' "${lines[@]}" >&2
+    printf '%s\n' "${lines[@]}"
+}
+
+deny_with_hints() {
+    local message="$1"
+    shift
+
+    local -a lines=("${PROGRAM_NAME}: Denied ${message}")
+    local hint
+    for hint in "$@"; do
+        lines+=("hint: ${hint}")
+    done
+
+    emit_denial_lines "${lines[@]}"
+    exit 126
+}
+
+deny() {
+    deny_with_hints "$*" \
+        "Assistant: stop and explain the blocked ${PROGRAM_NAME} policy to the user." \
+        "Assistant: do not invent a bypass; ask whether the workflow or allowlist should change."
+}
+
+deny_destructive() {
+    deny_with_hints "$1" \
+        "Assistant: do not delete untracked files or discard work from ${SANDBOX_NAME}." \
+        "Assistant: inspect status/diff and ask the user before any destructive cleanup."
+}
+
+deny_reset_destructive() {
+    deny_with_hints "$1" \
+        "Assistant: do not discard tracked work from ${SANDBOX_NAME}." \
+        "Assistant: inspect status/diff and ask the user before any hard reset or cleanup."
+}
+
+deny_branch_movement() {
+    deny_with_hints "$1" \
+        "Assistant: use allowed branch-only switch forms instead of unsafe branch movement." \
+        "Assistant: ask the user before discarding changes, detaching HEAD, or using checkout."
+}
+
+deny_config_escape() {
+    deny_with_hints "$1" \
+        "Assistant: do not bypass ${SANDBOX_NAME} protections with config, hooks, signing, or editor overrides." \
+        "Assistant: use only allowed identity config or ask the user to adjust ${SANDBOX_NAME} policy with tests."
+}
+
+deny_path_escape() {
+    deny_with_hints "$1" \
+        "Assistant: keep paths inside the repository mounted for this ${SANDBOX_NAME} session." \
+        "Assistant: ask the user before staging or reading commit-message files outside the repo."
+}
+
+deny_unknown_command() {
+    deny_with_hints "$1" \
+        "Assistant: ${PROGRAM_NAME} uses an allowlist; do not invent shell workarounds." \
+        "Assistant: ask the user whether this command should be added with tests."
+}
+
+deny_run_outside_sandbox() {
+    local command_text="$1"
+    local category="${2:-generic}"
+    local -a lines=(
+        "fatal: ${SANDBOX_NAME} blocked ${command_text}; no ${command_text#git } was performed"
+    )
+
+    case "${category}" in
+    network)
+        lines+=(
+            "hint: Assistant: never push from ${SANDBOX_NAME} or perform network Git operations from this sandbox."
+            "hint: Assistant: summarize the intended remote operation and ask the user to run it outside ${SANDBOX_NAME}."
+        )
+        ;;
+    history)
+        lines+=(
+            "hint: Assistant: do not rewrite or integrate history inside ${SANDBOX_NAME}."
+            "hint: Assistant: explain the need and ask the user to run the history operation outside ${SANDBOX_NAME}."
+        )
+        ;;
+    destructive)
+        lines+=(
+            "hint: Assistant: do not delete untracked files or discard work from ${SANDBOX_NAME}."
+            "hint: Assistant: inspect status/diff and ask the user before any destructive cleanup."
+        )
+        ;;
+    *)
+        lines+=(
+            "hint: Assistant: stop and explain the blocked ${PROGRAM_NAME} policy to the user."
+            "hint: Assistant: do not invent a bypass; ask whether the workflow or allowlist should change."
+        )
+        ;;
+    esac
+
+    emit_denial_lines "${lines[@]}"
+    exit 128
+}
+
+find_real_git() {
+    local configured_real_git="${DEVBOX_REAL_GIT:-}"
+    if [[ -n "${configured_real_git}" ]]; then
+        if [[ -x "${configured_real_git}" ]]; then
+            printf '%s\n' "${configured_real_git}"
+            return 0
+        fi
+
+        error "configured real Git is not executable: ${configured_real_git}"
+        exit 127
+    fi
+
+    local candidate
+    for candidate in /usr/libexec/devbox/real-git /usr/bin/git /bin/git; do
+        if [[ -x "${candidate}" && "$(realpath "$candidate")" != "$(realpath "$0")" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    error "real git binary not found"
+    exit 127
+}
+
+arg_present() {
+    local needle="$1"
+    shift
+
+    local arg
+    for arg in "$@"; do
+        if [[ "${arg}" == "${needle}" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+validate_diff_tree_args() {
+    if [[ $# -ne 5 ||
+        "$1" != "diff-tree" ||
+        "$2" != "--no-commit-id" ||
+        "$3" != "--name-only" ||
+        "$4" != "-r" ||
+        "$5" != "HEAD" ]]; then
+        deny "git diff-tree only allows: git diff-tree --no-commit-id --name-only -r HEAD"
+    fi
+}
+
+split_global_options() {
+    GLOBAL_GIT_ARGS=()
+    REMAINING_GIT_ARGS=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -C)
+            if [[ $# -lt 2 ]]; then
+                deny "git -C without path"
+            fi
+            GLOBAL_GIT_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --git-dir | --work-tree | --namespace | --super-prefix)
+            if [[ $# -lt 2 ]]; then
+                deny "git global option ${1} without value"
+            fi
+            GLOBAL_GIT_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --git-dir=* | --work-tree=* | --namespace=* | --super-prefix=*)
+            GLOBAL_GIT_ARGS+=("$1")
+            shift
+            ;;
+        --no-optional-locks)
+            # Read-only status integrations such as Fancy Footer pass this
+            # global flag to guarantee they never take optional repository locks.
+            GLOBAL_GIT_ARGS+=("$1")
+            shift
+            ;;
+        -c)
+            if [[ $# -lt 2 ]]; then
+                deny "git -c without key=value"
+            fi
+            case "$2" in
+            user.name=* | user.email=* | author.name=* | author.email=* | committer.name=* | committer.email=*)
+                GLOBAL_GIT_ARGS+=("$1" "$2")
+                shift 2
+                ;;
+            core.hooksPath=* | commit.gpgsign=* | core.editor=*)
+                deny_config_escape "git global config override blocked: $2"
+                ;;
+            *)
+                deny_config_escape "git global config not allowlisted: $2"
+                ;;
+            esac
+            ;;
+        --config=*)
+            case "${1#--config=}" in
+            user.name=* | user.email=* | author.name=* | author.email=* | committer.name=* | committer.email=*)
+                GLOBAL_GIT_ARGS+=("$1")
+                shift
+                ;;
+            core.hooksPath=* | commit.gpgsign=* | core.editor=*)
+                deny_config_escape "git global config override blocked: ${1#--config=}"
+                ;;
+            *)
+                deny_config_escape "git global config not allowlisted: ${1#--config=}"
+                ;;
+            esac
+            ;;
+        --)
+            shift
+            REMAINING_GIT_ARGS+=("$@")
+            return 0
+            ;;
+        *)
+            REMAINING_GIT_ARGS=("$@")
+            return 0
+            ;;
+        esac
+    done
+}
+
+is_identity_config_key() {
+    case "$1" in
+    user.name | user.email | author.name | author.email | committer.name | committer.email)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+validate_config_args() {
+    if [[ $# -eq 0 ]]; then
+        deny "git config without key"
+    fi
+
+    case "$1" in
+    --global | --system | --file | --blob | --includes | --edit | -e)
+        deny "git config option blocked: $1"
+        ;;
+    --file=* | --blob=*)
+        deny "git config option blocked: ${1%%=*}"
+        ;;
+    --local)
+        shift
+        ;;
+    --get)
+        shift
+        if [[ $# -ne 1 ]] || ! is_identity_config_key "$1"; then
+            deny "git config --get only allows identity keys"
+        fi
+        return 0
+        ;;
+    esac
+
+    if [[ $# -lt 1 ]] || ! is_identity_config_key "$1"; then
+        deny "git config only allows local identity keys"
+    fi
+}
+
+validate_switch_args() {
+    local create_mode=0
+    local branch_count=0
+    local arg
+
+    if [[ $# -eq 0 ]]; then
+        deny "git switch without branch"
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        case "${arg}" in
+        -)
+            branch_count=$((branch_count + 1))
+            shift
+            ;;
+        -c | --create)
+            if [[ "${create_mode}" -eq 1 ]]; then
+                deny "git switch duplicate create option"
+            fi
+            if [[ $# -lt 2 ]]; then
+                deny "git switch ${arg} without branch"
+            fi
+            create_mode=1
+            branch_count=$((branch_count + 1))
+            shift 2
+            ;;
+        --create=*)
+            if [[ "${create_mode}" -eq 1 ]]; then
+                deny "git switch duplicate create option"
+            fi
+            if [[ -z "${arg#--create=}" ]]; then
+                deny "git switch --create without branch"
+            fi
+            create_mode=1
+            branch_count=$((branch_count + 1))
+            shift
+            ;;
+        --quiet)
+            shift
+            ;;
+        --discard-changes | --force | -f | --detach | --merge | -m | --orphan | --guess | --no-guess | --ignore-other-worktrees | --recurse-submodules | --no-recurse-submodules)
+            deny_branch_movement "git switch unsafe option: ${arg}"
+            ;;
+        --*)
+            deny_branch_movement "git switch option not allowlisted: ${arg}"
+            ;;
+        -*)
+            deny_branch_movement "git switch option not allowlisted: ${arg}"
+            ;;
+        *)
+            branch_count=$((branch_count + 1))
+            shift
+            ;;
+        esac
+    done
+
+    if [[ "${branch_count}" -ne 1 ]]; then
+        deny "git switch expects exactly one branch"
+    fi
+}
+
+validate_reset_args() {
+    if [[ $# -eq 0 ]]; then
+        return 0
+    fi
+
+    case "$1" in
+    --hard)
+        if [[ $# -eq 2 && "${2}" == "--no-recurse-submodules" ]]; then
+            return 0
+        fi
+        deny_reset_destructive "git reset --hard blocked except worktree internal shape"
+        ;;
+    --merge | --keep | --recurse-submodules | --no-recurse-submodules)
+        deny_reset_destructive "git reset unsafe option: $1"
+        ;;
+    --soft | --mixed)
+        if [[ $# -ne 2 ]]; then
+            deny "git reset $1 expects exactly one commit"
+        fi
+        case "$2" in
+        -*)
+            deny "git reset $1 invalid commit: $2"
+            ;;
+        esac
+        return 0
+        ;;
+    --)
+        if [[ $# -lt 2 ]]; then
+            deny "git reset -- without paths"
+        fi
+        return 0
+        ;;
+    --*)
+        deny "git reset option not allowlisted: $1"
+        ;;
+    -*)
+        deny "git reset option not allowlisted: $1"
+        ;;
+    esac
+
+    if [[ $# -eq 1 ]]; then
+        return 0
+    fi
+
+    if [[ $# -ge 3 && "$2" == "--" ]]; then
+        return 0
+    fi
+
+        deny_reset_destructive "git reset arguments not allowlisted"
+}
+
+validate_add_paths() {
+    local real_git="$1"
+    shift
+
+    local -a scoped_git_args=()
+    local -a scoped_cwd=("${PWD}")
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--" ]]; then
+            shift
+            break
+        fi
+
+        scoped_git_args+=("$1")
+        shift
+    done
+
+    local cwd_arg="${scoped_cwd[0]}"
+    local i=0
+    local scoped_arg
+    while [[ ${i} -lt ${#scoped_git_args[@]} ]]; do
+        scoped_arg="${scoped_git_args[${i}]}"
+        if [[ "${scoped_arg}" == "-C" ]]; then
+            i=$((i + 1))
+            if [[ ${i} -lt ${#scoped_git_args[@]} ]]; then
+                cwd_arg="${scoped_git_args[${i}]}"
+            fi
+        fi
+        i=$((i + 1))
+    done
+
+    local check_base="${cwd_arg}"
+    if [[ "${cwd_arg}" = /* ]]; then
+        check_base="$(realpath -m -- "${cwd_arg}")"
+    else
+        check_base="$(realpath -m -- "${PWD}/${cwd_arg}")"
+    fi
+
+    local repo_root
+    if ! repo_root="$(${real_git} "${scoped_git_args[@]}" rev-parse --show-toplevel 2>/dev/null)"; then
+        deny "git add outside a repository"
+    fi
+
+    local arg
+    local resolved_path
+    for arg in "$@"; do
+        case "${arg}" in
+        -A | --all | -u | --update | . | :/*)
+            continue
+            ;;
+        --)
+            continue
+            ;;
+        -*)
+            continue
+            ;;
+        esac
+
+        if [[ "${arg}" = /* ]]; then
+            resolved_path="$(realpath -m -- "${arg}")"
+        else
+            resolved_path="$(realpath -m -- "${check_base}/${arg}")"
+        fi
+
+        if [[ "${resolved_path}" != "${repo_root}" && "${resolved_path}" != "${repo_root}"/* ]]; then
+            deny_path_escape "git add path outside repo: ${arg}"
+        fi
+    done
+}
+
+validate_commit_file_paths() {
+    local real_git="$1"
+    shift
+
+    local -a scoped_git_args=()
+    local -a scoped_cwd=("${PWD}")
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--" ]]; then
+            shift
+            break
+        fi
+
+        scoped_git_args+=("$1")
+        shift
+    done
+
+    local cwd_arg="${scoped_cwd[0]}"
+    local i=0
+    local scoped_arg
+    while [[ ${i} -lt ${#scoped_git_args[@]} ]]; do
+        scoped_arg="${scoped_git_args[${i}]}"
+        if [[ "${scoped_arg}" == "-C" ]]; then
+            i=$((i + 1))
+            if [[ ${i} -lt ${#scoped_git_args[@]} ]]; then
+                cwd_arg="${scoped_git_args[${i}]}"
+            fi
+        fi
+        i=$((i + 1))
+    done
+
+    local check_base="${cwd_arg}"
+    if [[ "${cwd_arg}" = /* ]]; then
+        check_base="$(realpath -m -- "${cwd_arg}")"
+    else
+        check_base="$(realpath -m -- "${PWD}/${cwd_arg}")"
+    fi
+
+    local repo_root
+    if ! repo_root="$(${real_git} "${scoped_git_args[@]}" rev-parse --show-toplevel 2>/dev/null)"; then
+        deny "git commit -F outside a repository"
+    fi
+
+    local index=1
+    local arg
+    local message_file
+    local resolved_path
+    while [[ ${index} -le $# ]]; do
+        arg="${!index}"
+        case "${arg}" in
+        -F | --file)
+            index=$((index + 1))
+            if [[ ${index} -gt $# ]]; then
+                deny "git commit ${arg} without a message file"
+            fi
+            message_file="${!index}"
+            if [[ "${message_file}" = /* ]]; then
+                resolved_path="$(realpath -m -- "${message_file}")"
+            else
+                resolved_path="$(realpath -m -- "${check_base}/${message_file}")"
+            fi
+            if [[ "${resolved_path}" != "${repo_root}" && "${resolved_path}" != "${repo_root}"/* ]]; then
+                deny_path_escape "git commit message file outside repo: ${message_file}"
+            fi
+            ;;
+        --file=*)
+            message_file="${arg#--file=}"
+            if [[ "${message_file}" = /* ]]; then
+                resolved_path="$(realpath -m -- "${message_file}")"
+            else
+                resolved_path="$(realpath -m -- "${check_base}/${message_file}")"
+            fi
+            if [[ "${resolved_path}" != "${repo_root}" && "${resolved_path}" != "${repo_root}"/* ]]; then
+                deny_path_escape "git commit message file outside repo: ${message_file}"
+            fi
+            ;;
+        esac
+        index=$((index + 1))
+    done
+}
+
+main() {
+    if [[ "${1:-}" == "--devbox-git-version" ]]; then
+        printf '%s %s\n' "${PROGRAM_NAME}" "${PROGRAM_VERSION}"
+        return 0
+    fi
+
+    local -a original_git_args=("$@")
+
+    local real_git
+    real_git="$(find_real_git)"
+
+    local -a GLOBAL_GIT_ARGS=()
+    local -a REMAINING_GIT_ARGS=()
+    split_global_options "$@"
+    set -- "${REMAINING_GIT_ARGS[@]}"
+
+    local subcommand="${1:-}"
+    if [[ -z "${subcommand}" ]]; then
+        exec "${real_git}"
+    fi
+
+    case "${subcommand}" in
+    init)
+        exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+        ;;
+    config)
+        validate_config_args "${@:2}"
+        exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+        ;;
+    status | diff | log | show | branch | rev-parse | merge-base | for-each-ref | symbolic-ref | cat-file | name-rev | ls-files)
+        exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+        ;;
+    diff-tree)
+        validate_diff_tree_args "${original_git_args[@]}"
+        exec "${real_git}" "$@"
+        ;;
+    remote)
+        case "${2:-}" in
+        "" | -v)
+            exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+            ;;
+        *)
+            deny "git remote ${2:-}"
+            ;;
+        esac
+        ;;
+    worktree)
+        case "${2:-}" in
+        list | add | remove | move | prune | repair | lock | unlock)
+            exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+            ;;
+        *)
+            deny "git worktree ${2:-}"
+            ;;
+        esac
+        ;;
+    maintenance)
+        case "${2:-}" in
+        run)
+            exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+            ;;
+        *)
+            deny "git maintenance ${2:-}"
+            ;;
+        esac
+        ;;
+    add)
+        validate_add_paths "${real_git}" "${GLOBAL_GIT_ARGS[@]}" -- "${@:2}"
+        exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+        ;;
+    commit)
+        if arg_present --amend "${@:2}" || arg_present -c "${@:2}" || arg_present -C "${@:2}"; then
+            deny "git commit history rewrite/reuse options"
+        fi
+
+        if ! arg_present -m "${@:2}" && ! arg_present -F "${@:2}"; then
+            deny "git commit without explicit -m or -F"
+        fi
+
+        validate_commit_file_paths "${real_git}" "${GLOBAL_GIT_ARGS[@]}" -- "${@:2}"
+
+        exec "${real_git}" \
+            "${GLOBAL_GIT_ARGS[@]}" \
+            -c core.hooksPath=/dev/null \
+            -c commit.gpgsign=false \
+            -c core.editor=true \
+            "$@"
+        ;;
+    switch)
+        validate_switch_args "${@:2}"
+        exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+        ;;
+    reset)
+        validate_reset_args "${@:2}"
+        exec "${real_git}" "${GLOBAL_GIT_ARGS[@]}" "$@"
+        ;;
+    push | pull | fetch)
+        deny_run_outside_sandbox "git ${subcommand}" "network"
+        ;;
+    rebase | merge | cherry-pick | revert | tag | checkout)
+        deny_run_outside_sandbox "git ${subcommand}" "history"
+        ;;
+    clean)
+        deny_run_outside_sandbox "git ${subcommand}" "destructive"
+        ;;
+    *)
+        deny_unknown_command "unknown git command: git ${subcommand}"
+        ;;
+    esac
+}
+
+main "$@"

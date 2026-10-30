@@ -1,0 +1,4 @@
+schema: ramona-plan
+created: 2026-08-24
+idea: persist-bounded-ramona-state-in-devbox
+skip_specs: true

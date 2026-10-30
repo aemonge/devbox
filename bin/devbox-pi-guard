@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+: "${DEVBOX_REAL_PI:?DEVBOX_REAL_PI is required}"
+: "${DEVBOX_AGENT_CONTEXT_FILE:?DEVBOX_AGENT_CONTEXT_FILE is required}"
+
+if [[ ! -x "${DEVBOX_REAL_PI}" ]]; then
+    printf 'devbox: real Pi binary is not executable: %s\n' "${DEVBOX_REAL_PI}" >&2
+    exit 1
+fi
+if [[ ! -r "${DEVBOX_AGENT_CONTEXT_FILE}" ]]; then
+    printf 'devbox: Pi agent context is not readable: %s\n' "${DEVBOX_AGENT_CONTEXT_FILE}" >&2
+    exit 1
+fi
+: "${DEVBOX_PI_TITLE_EXTENSION:=}"
+
+case "${1:-}" in
+install | remove | uninstall | update | list | config | \
+    -h | --help | -v | --version | --list-models | --export)
+    exec "${DEVBOX_REAL_PI}" "$@"
+    ;;
+esac
+
+for argument in "$@"; do
+    case "${argument}" in
+    --) break ;;
+    -nc | --no-context-files)
+        exec "${DEVBOX_REAL_PI}" "$@"
+        ;;
+    esac
+done
+
+if [[ -n "${DEVBOX_PI_TITLE_EXTENSION}" && ! -r "${DEVBOX_PI_TITLE_EXTENSION}" ]]; then
+    printf 'devbox: Pi title extension is not readable: %s\n' "${DEVBOX_PI_TITLE_EXTENSION}" >&2
+    exit 1
+fi
+
+if [[ -n "${DEVBOX_PI_TITLE_EXTENSION}" ]]; then
+    exec "${DEVBOX_REAL_PI}" \
+        --append-system-prompt "${DEVBOX_AGENT_CONTEXT_FILE}" \
+        --extension "${DEVBOX_PI_TITLE_EXTENSION}" \
+        "$@"
+fi
+
+exec "${DEVBOX_REAL_PI}" \
+    --append-system-prompt "${DEVBOX_AGENT_CONTEXT_FILE}" \
+    "$@"
