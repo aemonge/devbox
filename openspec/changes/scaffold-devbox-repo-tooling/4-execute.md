@@ -126,7 +126,13 @@
   optionally `./install.sh --prefix /tmp/devbox-try && /tmp/devbox-try/bin/devbox --version`,
   then reply with the verdict.
 
-- [x] Human validation, response: pending
+- [x] Human validation, response: VALID ("go!" with 🎉 host output) ·
+      outcome: accepted — `DEVBOX_SKIP_PI_PARITY=1 bin/devbox -- --validate`
+      fully green on the capable host incl. live sandbox tests · surfaced:
+      pi-parity store drift → debt ledger, fix scheduled as slice 0 of
+      speed-up-devbox-startup · host baseline recorded there: 622ms wall /
+      595ms pre-exec (host-tool binds 178ms, integration tail 262ms,
+      env+argv assembly 78ms, cache read 29ms, tool discovery 25ms)
 
 ### Addendum — findings from the Human's host validation (2026-11-01)
 
@@ -399,3 +405,5 @@ run_devbox_validation's X-loop expects). Wiring and findings:
   gate-attributed · tool: bash · paths: — · at 2026-11-01T17:00:32Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T17:26:37Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:27:03Z
