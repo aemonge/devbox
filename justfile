@@ -19,5 +19,11 @@ fmt:
 fmt-check:
     shfmt -i 4 --diff {{shell_scripts}}
 
+# bats suites: syntax + smoke + guard contracts
+# (`unit` is reserved for the function-level harness that lands with the
+# lib/ module split — the monolith cannot be sourced without side effects)
+test:
+    bats tests/
+
 # aggregate gate
-check: lint fmt-check
+check: lint fmt-check test

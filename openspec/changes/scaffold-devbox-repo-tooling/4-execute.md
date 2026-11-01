@@ -47,11 +47,23 @@
 
 ### Slice 3 — test harness
 
-- [ ] tests/ bats: syntax suite + smoke suite with honest in-sandbox guards
-      check: pending
-      paths: tests/
-- [ ] justfile: test (unit reserved)
-      check: pending
+- [x] tests/ bats: syntax suite + smoke suite + guard contracts with honest
+      in-sandbox capability guards
+      check: 25/25 green in-sandbox; `just check` (lint + fmt-check + test)
+      green; smoke tests probe namespace capability with the same bwrap shape
+      as check_bwrap_namespace_support and assert the environment-appropriate
+      contract (in-sandbox: refusal + message; capable host: full --validate
+      pass, doctor skipped as environment-dependent)
+      surfaced: two test-authoring bugs found by the suite itself — ambient
+      DEVBOX_PI_TITLE_EXTENSION from the running devbox session leaked into
+      guard assertions (fixed: env -u), and GNU env stops option parsing
+      after the first NAME=VALUE so a trailing -u became the command and
+      exited 127 (fixed: options before assignments). No product changes.
+      paths: tests/syntax.bats, tests/smoke.bats, tests/guards.bats,
+      tests/fixtures/fake-runtime, tests/fixtures/context.md, justfile
+- [x] justfile: test (unit reserved for the post-split harness, documented
+      inline)
+      check: recipe runs bats tests/; aggregate check extended to test
       paths: justfile
 - [ ] Commit `test: add bats syntax and smoke harness`
       hash: pending
@@ -137,3 +149,27 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:43:08Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:43:31Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tests/syntax.bats · at 2026-11-01T10:45:07Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tests/smoke.bats · at 2026-11-01T10:45:07Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/tests/smoke.bats · at 2026-11-01T10:45:18Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tests/fixtures/fake-runtime · at 2026-11-01T10:45:18Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tests/fixtures/context.md · at 2026-11-01T10:45:18Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tests/guards.bats · at 2026-11-01T10:45:41Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/justfile · at 2026-11-01T10:45:45Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:45:51Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/tests/guards.bats · at 2026-11-01T10:47:01Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:47:07Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:47:13Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:47:40Z

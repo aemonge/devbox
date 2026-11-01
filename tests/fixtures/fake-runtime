@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test fixture: echoes each argument on its own line. Stands in for a real
+# pi/opencode binary so guard passthrough and flag injection are observable.
+printf '%s\n' "$@"
