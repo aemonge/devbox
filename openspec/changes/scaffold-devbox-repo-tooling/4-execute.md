@@ -109,13 +109,22 @@
       README development section updated with all seven recipes
       paths: tapes/intro.tape, tapes/doctor.tape, justfile, README.md,
       openspec/learnings/debt.md
-- [ ] Commit `docs: add vhs demo tapes`
-      hash: pending
+- [x] Commit `docs: add vhs demo tapes`
+      hash: 7a4470a
 
 ### Verification
 
-- pending — `just check` per slice; clean `git status`; 4/4 artifacts.
-- Human-only act (open): host-side `just check` + verdict reply.
+- Deterministic: `just check` green after every slice (shellcheck zero
+  findings ×6 scripts, shfmt diff-clean, bats 32/32); `bash -n` OK on every
+  touched script; `git status` clean; history shows exactly the six declared
+  commits (fac1c04, 852291a, 2c84d7a, 640fb32, 761a82d, 7a4470a) on top of
+  the baseline 600a084.
+- In-sandbox limits recorded honestly: `--validate` cannot pass nested
+  (namespace refusal, identical pre/post-format — exonerates the shfmt
+  rewrite); VHS render refused (Chrome endpoint) — host-side debt logged.
+- Human-only act: from a host shell in the repo — `just check`, then
+  optionally `./install.sh --prefix /tmp/devbox-try && /tmp/devbox-try/bin/devbox --version`,
+  then reply with the verdict.
 
 - [ ] Human validation, response: pending
 
@@ -228,3 +237,5 @@
   gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/README.md · at 2026-11-01T10:52:31Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:52:52Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:53:34Z
