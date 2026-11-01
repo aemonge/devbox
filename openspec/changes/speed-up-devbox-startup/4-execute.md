@@ -24,9 +24,18 @@
 
 ### Slice 1 — pi-parity fixture: green baseline
 
-- [ ] Host probe artifact + Human-run receipt
-      check: pending
-- [ ] Fix (product or fixture per probe) + suite green, NO skip flag
+- [x] Host probe artifact (scripts/probe-pi-parity): replicates the parity
+      fixture invocation behind a capturing bwrap shim; prints host pi
+      resolution (file type, realpath, shim head), live pnpm store envs,
+      and every pi/pnpm/node-related argv entry + PI_CODING_AGENT_DIR
+      neighborhood from the assembled mount plan
+      check: mechanism verified in-sandbox (capture shim logs
+      `bwrap --version` capability calls only — nested assembly dies at this
+      box's own pi-guard collision before the real argv, an in-sandbox
+      artifact, not the fixture's defect); host run pending — ONE Human
+      command: `scripts/probe-pi-parity`
+      paths: scripts/probe-pi-parity, justfile
+- [ ] Fix per probe + suite green, NO skip flag
       check: pending
 - [ ] Commit `fix: mount the resolved pi entry for shim launches`
       hash: pending

@@ -34,11 +34,17 @@ printf '{"name":"absolute-fixture","pi":{"extensions":["./index.ts"]}}\n' >"${FI
 printf 'export default function (pi) { pi.registerFlag("probe-package-loaded", { type: "boolean", default: false }); }\n' \
     >"${FIXTURE_PACKAGE}/index.ts"
 
-# Capturing bwrap: records argv and exits without launching.
+# Capturing bwrap: records capability probes and passes real launches
+# through to the host bwrap so the fixture actually runs.
 cat >"${PROBE_ROOT}/bin/bwrap" <<'CAPTURE_SH'
 #!/usr/bin/env bash
-printf 'call from ppid=%s: argc=%s argv0=%s\n' "${PPID}" "$#" "${1:-<none>}" >>"${DEVBOX_PROBE_CAPTURE}.log"
+if [[ "${1:-}" == "--version" || "${1:-}" == "--help" ]]; then
+    printf 'capability probe: argc=%s argv0=%s\n' "$#" "${1}" >>"${DEVBOX_PROBE_CAPTURE}.log"
+    exit 0
+fi
+printf 'real launch: argc=%s first=%s\n' "$#" "${1:-<none>}" >>"${DEVBOX_PROBE_CAPTURE}.log"
 printf '%s\0' "$@" >"${DEVBOX_PROBE_CAPTURE}"
+exec /usr/bin/bwrap "$@"
 CAPTURE_SH
 chmod +x "${PROBE_ROOT}/bin/bwrap"
 
