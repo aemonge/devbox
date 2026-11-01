@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# devbox startup bench: hyperfine timings, phase trace, and a PS4 fork census.
+# Full timing runs are host-only; inside a nested devbox the census and trace
+# still work (forced probe) and the timing sections are honestly skipped.
+
+set -Eeuo pipefail
+
+readonly PROGRAM_NAME="bench"
+REPO_ROOT="$(cd -- "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+readonly REPO_ROOT
+readonly DEVBOX="${REPO_ROOT}/bin/devbox"
+readonly TARGET="${DEVBOX_BENCH_TARGET:-/tmp}"
+
+error() {
+    printf '%s: %s\n' "${PROGRAM_NAME}" "$*" >&2
+}
+
+section() {
+    printf '\n=== %s ===\n' "$1"
+}
+
+[[ -x "${DEVBOX}" ]] || {
+    error "devbox not found at ${DEVBOX}"
+    exit 1
+}
+command -v hyperfine >/dev/null 2>&1 || error "hyperfine not found — timing sections will be skipped"
+command -v python3 >/dev/null 2>&1 || {
+    error "python3 required for the fork census"
+    exit 1
+}
+
+nested=no
+if [[ "${DEVBOX_ACTIVE:-0}" == "1" ]]; then
+    nested=yes
+fi
+
+section "fork census (PS4, forced probe — fork structure, uncached discovery)"
+census_tmp="$(mktemp -d)"
+trap 'rm -rf -- "${census_tmp}"' EXIT
+PS4='+T ${EPOCHREALTIME} ' DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
+    >/dev/null 2>"${census_tmp}/trace.txt" || true
+python3 - "${census_tmp}/trace.txt" <<'PYEOF'
+import re
+import sys
+
+external = (
+    "mkdir ", "base64", "chmod", "mktemp", "mv ", "grep ", "stat ", "realpath",
+    "readlink", "python3", "node ", "jq ", "ps ", "cp ", "date ", "uname",
+    "command -v", "find ", "sort ", "bwrap ", "ssh ", "git ", "tee ",
+)
+counts = {}
+total_lines = 0
+first_t = last_t = None
+prev_t = None
+for raw in open(sys.argv[1], errors="replace"):
+    m = re.match(r"^\+T ([0-9.]+) (.*)", raw)
+    if not m:
+        continue
+    total_lines += 1
+    t = float(m.group(1))
+    content = m.group(2)
+    first_t = first_t if first_t is not None else t
+    last_t = t
+    for token in external:
+        if content.startswith(token) or f"$( {token.strip()}" in content:
+            counts[token.strip()] = counts.get(token.strip(), 0) + 1
+            break
+print(f"trace lines: {total_lines}, span: {(last_t - first_t) * 1000:.0f}ms (inflated by tracing)")
+for name, count in sorted(counts.items(), key=lambda kv: -kv[1])[:15]:
+    print(f"  {count:4d}x  {name}")
+PYEOF
+
+section "startup phase trace (real caches — nested boxes end at the namespace refusal)"
+DEVBOX_TRACE_STARTUP=1 "${DEVBOX}" /bin/true -- "${TARGET}" -q 2>&1 || true
+
+if [[ "${nested}" == "yes" ]]; then
+    section "timing (skipped: nested devbox — hyperfine full-path numbers are host-only)"
+    exit 0
+fi
+
+if command -v hyperfine >/dev/null 2>&1; then
+    section "hyperfine: parse-only"
+    hyperfine --warmup 5 --style basic "'${DEVBOX}' --version"
+    section "hyperfine: full startup (exec true)"
+    hyperfine --warmup 3 --style basic "'${DEVBOX}' /bin/true -- '${TARGET}' -q"
+fi
