@@ -36,9 +36,20 @@
       command: `scripts/probe-pi-parity`
       paths: scripts/probe-pi-parity, justfile
 - [ ] Fix per probe + suite green, NO skip flag
-      check: pending
+      check: pending — root cause named: host pi is a self-resolving SCRIPT
+      shim; devbox exact-file-binds it; the shim's runtime resolution needs
+      ~/.local/share/pnpm/** which --no-host-tools omits, so it lands on a
+      stale-lockfile env (3e4f681e…) whose cli.js is not mounted. Fixture
+      fix (9612ad5): explicit read-only `--add ~/.local/share/pnpm` on the
+      parity invocation — the test's variable is absolute-package read-only
+      loading, not shim survival without host tools; probe upgraded to pass
+      real launches through (receipts on next host run). Product hardening
+      (bind the resolved entry chain for script shims) → debt ledger.
+      pending: host `bin/test/devbox-pi-parity-test` green (no skip flag)
+      + probe receipt
 - [ ] Commit `fix: mount the resolved pi entry for shim launches`
-      hash: pending
+      hash: pending (fixture-level fix committed early as 9612ad5;
+      product-level fix decision after host receipt)
 
 ### Slice 2 — host-tool binds: retire the mkdir storm
 
