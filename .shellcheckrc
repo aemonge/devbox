@@ -1,0 +1,3 @@
+# shellcheck policy for devbox
+# All scripts are bash with bashisms by design; nothing to relax by default.
+shell=bash

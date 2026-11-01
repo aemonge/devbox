@@ -19,7 +19,7 @@ readonly NC='\033[0m'
 
 usage() {
     cat <<'USAGE_EOF'
-devbox 0.1.0
+devbox 0.2.0
 Mount-isolated developer box using Bubblewrap.
 
 Usage:
@@ -163,7 +163,10 @@ read_discovery_cache() {
             DEVBOX_CACHE_BWRAP_DISABLE_USERNS_SUPPORTED | DEVBOX_CACHE_BWRAP_NAMESPACE_SUPPORT | \
             DEVBOX_CACHE_REAL_GIT_HOST | DEVBOX_CACHE_REAL_GIT_REALPATH | \
             DEVBOX_CACHE_DEVBOX_GIT_HOST | DEVBOX_CACHE_DEVBOX_GIT_REALPATH) ;;
-        *) valid=0; continue ;;
+        *)
+            valid=0
+            continue
+            ;;
         esac
         if [[ -n "${seen_keys[${cache_key}]:-}" ]]; then
             valid=0
@@ -184,14 +187,14 @@ read_discovery_cache() {
     # full validation, which is stricter than assigning while scanning.
     local joined_encoded=""
     local padded_value
-    local last_index=$(( ${#cache_keys[@]} - 1 ))
+    local last_index=$((${#cache_keys[@]} - 1))
     local index
     for index in "${!cache_keys[@]}"; do
         # read strips one trailing '=' from singly padded values; GNU base64
         # only tolerates an unpadded tail at end-of-stream, so restore
         # canonical padding before values are joined into one stream.
         padded_value="${cache_encoded_values[index]}"
-        while (( ${#padded_value} % 4 != 0 )); do
+        while ((${#padded_value} % 4 != 0)); do
             padded_value+="="
         done
         joined_encoded+="${padded_value}"
@@ -586,7 +589,8 @@ bind_pi_absolute_local_packages() {
             exit 1
         fi
     elif command -v python3 >/dev/null 2>&1; then
-        if ! package_sources="$(python3 - "${settings_path}" <<'PY'
+        if ! package_sources="$(
+            python3 - "${settings_path}" <<'PY'
 import json
 import sys
 
@@ -885,9 +889,9 @@ prepare_pi_writable_state() {
     # require an independent Devbox state root, so Pi session IDs work on both
     # sides of the sandbox boundary. Whole-agent and session-leaf symlinks stay
     # isolated and are never followed writable.
-    if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 && \
-        "${PI_AGENT_DIR}" == "${default_agent_dir}" && \
-        "${PI_AGENT_DIR_REAL}" == "${default_agent_dir}" && \
+    if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 &&
+        "${PI_AGENT_DIR}" == "${default_agent_dir}" &&
+        "${PI_AGENT_DIR_REAL}" == "${default_agent_dir}" &&
         ! -L "${PI_AGENT_DIR}/sessions" ]]; then
         validate_pi_state_directory_leaf "${PI_AGENT_DIR}" sessions || exit 1
         PI_AGENT_SESSION_SOURCE_DIR="${PI_AGENT_DIR}/sessions"
@@ -909,7 +913,7 @@ prepare_pi_writable_state() {
         validate_independent_pi_state_root || exit 1
         if [[ -e "${PI_AGENT_STATE_SOURCE_ROOT}" ]]; then
             for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
-                if [[ "${resource_path}" == sessions && \
+                if [[ "${resource_path}" == sessions &&
                     "${PI_AGENT_SESSION_SOURCE_DIR}" != "${PI_AGENT_STATE_SOURCE_ROOT}/sessions" ]]; then
                     continue
                 fi
@@ -1005,7 +1009,7 @@ assemble_pi_agent_resource_closure() {
         done
     else
         opt_ro_bind_dir "${HOST_HOME}/.pi" "${SANDBOX_HOME}/.pi"
-    add_parent_dirs_once "${SANDBOX_PI_AGENT_ASSEMBLY_DIR%/*}"
+        add_parent_dirs_once "${SANDBOX_PI_AGENT_ASSEMBLY_DIR%/*}"
         add_extra_dir_once "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}"
         PI_BINDS+=(--tmpfs "${SANDBOX_PI_AGENT_ASSEMBLY_DIR}")
     fi
@@ -1084,7 +1088,7 @@ bind_nearest_project_openspec() {
         resolved_source_search_dir="${TARGET_SOURCE_PARENT_DIR}"
     fi
 
-    while [[ -n "${resolved_source_search_dir}" && "${resolved_source_search_dir}" != "/" && \
+    while [[ -n "${resolved_source_search_dir}" && "${resolved_source_search_dir}" != "/" &&
         -n "${resolved_logical_search_dir}" && "${resolved_logical_search_dir}" != "/" ]]; do
         source_openspec_dir="${resolved_source_search_dir}/openspec"
         logical_openspec_dir="${resolved_logical_search_dir}/openspec"
@@ -1612,7 +1616,7 @@ prepare_pi_command_guard() {
         pi_host="$(command -v pi 2>/dev/null || true)"
         [[ "${pi_host}" == /* && -x "${pi_host}" ]] || return 0
         pi_real="$(realpath "${pi_host}")"
-    add_parent_dirs_once "${pi_real%/*}"
+        add_parent_dirs_once "${pi_real%/*}"
         case "${pi_real}" in
         /usr/* | /bin/* | /sbin/*) ;;
         *)
@@ -1709,9 +1713,9 @@ run_opencode_plugin_preflight() {
     if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
         DEVBOX_OPENCODE_INTEGRITY_NO_CACHE=1 \
             "${integrity_helper}" "${config_path}" "${package_cache}" "${integrity_cache}" || {
-                error "OpenCode plugin preflight failed; repair the listed plugins before launch"
-                return 1
-            }
+            error "OpenCode plugin preflight failed; repair the listed plugins before launch"
+            return 1
+        }
         return 0
     fi
     if ! "${integrity_helper}" "${config_path}" "${package_cache}" "${integrity_cache}"; then
@@ -1867,7 +1871,7 @@ prepare_nvim_editor_runtime() {
         runtime_parent="${host_runtime}"
     else
         runtime_parent="/tmp/devbox-editor-runtime-${uid}"
-        if [[ -L "${runtime_parent}" || ( -e "${runtime_parent}" && ! -d "${runtime_parent}" ) ]]; then
+        if [[ -L "${runtime_parent}" || (-e "${runtime_parent}" && ! -d "${runtime_parent}") ]]; then
             error "unsafe fallback editor runtime path: ${runtime_parent}"
             exit 1
         fi
@@ -1885,7 +1889,7 @@ prepare_nvim_editor_runtime() {
     fi
 
     DEVBOX_EDITOR_RUNTIME_BASE="${runtime_parent}/devbox"
-    if [[ -L "${DEVBOX_EDITOR_RUNTIME_BASE}" || ( -e "${DEVBOX_EDITOR_RUNTIME_BASE}" && ! -d "${DEVBOX_EDITOR_RUNTIME_BASE}" ) ]]; then
+    if [[ -L "${DEVBOX_EDITOR_RUNTIME_BASE}" || (-e "${DEVBOX_EDITOR_RUNTIME_BASE}" && ! -d "${DEVBOX_EDITOR_RUNTIME_BASE}") ]]; then
         error "unsafe Devbox editor runtime path: ${DEVBOX_EDITOR_RUNTIME_BASE}"
         exit 1
     fi
@@ -2071,7 +2075,7 @@ bind_nvim_resources() {
         for plugin_path in "${host_nvim_lazy}"/*; do
             [[ -e "${plugin_path}" ]] || continue
             add_prepared_bind_once --ro-bind "${plugin_path}" \
-        "${sandbox_nvim_data}/lazy/${plugin_path##*/}"
+                "${sandbox_nvim_data}/lazy/${plugin_path##*/}"
         done
         ((had_dotglob)) || shopt -u dotglob
         ((had_nullglob)) || shopt -u nullglob
@@ -2082,7 +2086,7 @@ bind_nvim_resources() {
     # cannot create a new file mountpoint beneath a read-only directory, so a
     # configuration without lazy-lock.json simply keeps the whole tree read-only.
     if [[ -f "${host_nvim_lock}" && "${nvim_config_mounted}" -eq 1 ]]; then
-    mkdir -p -- "${host_devbox_nvim_lock%/*}"
+        mkdir -p -- "${host_devbox_nvim_lock%/*}"
         if [[ ! -e "${host_devbox_nvim_lock}" ]]; then
             cp -p -- "${host_nvim_lock}" "${host_devbox_nvim_lock}"
         fi
@@ -2216,7 +2220,7 @@ bind_skills_home_symlink_targets() {
     if [[ -d "${PI_AGENT_DIR}/skills" ]]; then
         skills_homes+=("$(realpath "${PI_AGENT_DIR}/skills")")
     fi
-    (( ${#skills_homes[@]} )) || return 0
+    ((${#skills_homes[@]})) || return 0
 
     for skills_home in "${skills_homes[@]}"; do
         resolved_home="$(realpath "${skills_home}")"
@@ -2237,7 +2241,7 @@ bind_skills_home_symlink_targets() {
                 warning "Skipping skills symlink without a directory target: ${host_path}"
                 continue
             fi
-            if [[ "${resolved_target}" == "${HOST_HOME}" ]] || \
+            if [[ "${resolved_target}" == "${HOST_HOME}" ]] ||
                 ! is_path_within "${HOST_HOME}" "${resolved_target}"; then
                 warning "Skipping skills symlink escaping HOME: ${host_path} -> ${resolved_target}"
                 continue
@@ -2365,7 +2369,7 @@ prepare_ssh_client_integration() {
         ((had_nullglob)) || shopt -u nullglob
         for config_path in "${system_config_files[@]}"; do
             [[ -f "${config_path}" && -r "${config_path}" ]] || continue
-    config_name="${config_path##*/}"
+            config_name="${config_path##*/}"
             exec {config_fd}<"${config_path}"
             SSH_CLIENT_FDS+=("${config_fd}")
             SSH_SYSTEM_CONFIG_ARGS+=(
@@ -2647,10 +2651,10 @@ run_doctor() {
     if [[ ! -x "${integrity_helper}" ]]; then
         validation_fail "Doctor FAIL: missing OpenCode integrity helper (${integrity_helper})"
         status=1
-    elif [[ "${EPHEMERAL_STATE}" -eq 1 ]] && \
+    elif [[ "${EPHEMERAL_STATE}" -eq 1 ]] &&
         DEVBOX_OPENCODE_INTEGRITY_NO_CACHE=1 "${integrity_helper}" "${opencode_config}" "${opencode_packages}" "${opencode_cache}"; then
         validation_pass 'Doctor PASS: current OpenCode plugins are structurally loadable (uncached)'
-    elif [[ "${EPHEMERAL_STATE}" -eq 0 ]] && \
+    elif [[ "${EPHEMERAL_STATE}" -eq 0 ]] &&
         "${integrity_helper}" "${opencode_config}" "${opencode_packages}" "${opencode_cache}"; then
         validation_pass 'Doctor PASS: current OpenCode plugins are structurally loadable'
     else
@@ -2842,7 +2846,7 @@ DEVBOX_PACKAGE
                 DEVBOX_GIT="${DEVBOX_GIT:-${script_dir}/devbox-git}" \
                 DEVBOX_FORCE_PROBE=1 \
                 "${script_path}" opencode debug config --pure -- "${test_project}" -q \
-                --no-aws --no-clipboard --no-ssh-agent 2>/dev/null)" && \
+                --no-aws --no-clipboard --no-ssh-agent 2>/dev/null)" &&
                 jq -e '.instructions as $instructions | (($instructions | index("existing-instruction.md")) != null and ($instructions | index("/devbox/agent-context.md")) != null)' \
                     <<<"${output}" >/dev/null; then
                 validation_pass 'Test A.5 PASS: OpenCode appends sandbox-only Devbox agent instructions'
@@ -3097,12 +3101,18 @@ while [[ $# -gt 0 ]]; do
         exit 0
         ;;
     -a | --add)
-        if [[ $# -lt 2 ]]; then error "missing argument for $1"; exit 1; fi
+        if [[ $# -lt 2 ]]; then
+            error "missing argument for $1"
+            exit 1
+        fi
         ADD_RO_PATHS+=("$2")
         shift 2
         ;;
     -A | --add-rw)
-        if [[ $# -lt 2 ]]; then error "missing argument for $1"; exit 1; fi
+        if [[ $# -lt 2 ]]; then
+            error "missing argument for $1"
+            exit 1
+        fi
         ADD_RW_PATHS+=("$2")
         shift 2
         ;;
@@ -3115,8 +3125,14 @@ while [[ $# -gt 0 ]]; do
         shift
         ;;
     --backend)
-        if [[ $# -lt 2 ]]; then error "missing argument for --backend"; exit 1; fi
-        if [[ "$2" != "bwrap" ]]; then error "devbox supports only the bwrap backend"; exit 1; fi
+        if [[ $# -lt 2 ]]; then
+            error "missing argument for --backend"
+            exit 1
+        fi
+        if [[ "$2" != "bwrap" ]]; then
+            error "devbox supports only the bwrap backend"
+            exit 1
+        fi
         shift 2
         ;;
     --backend=bwrap)
@@ -3571,7 +3587,7 @@ if [[ "${TARGET_KIND}" == "file" ]] && ! is_path_within "${PROJECT_SOURCE_DIR}" 
     EXTRA_BINDS+=(--ro-bind "${INVOCATION_CWD}" "${INVOCATION_CWD}")
 fi
 if [[ -n "${PROJECT_ALIAS_DIR}" ]]; then
-    if [[ "${PROJECT_ALIAS_DIR}" == "${SANDBOX_PI_AGENT_DIR}" && \
+    if [[ "${PROJECT_ALIAS_DIR}" == "${SANDBOX_PI_AGENT_DIR}" &&
         "${PROJECT_SOURCE_DIR}" == "${PI_AGENT_DIR_REAL}" ]]; then
         # ~/.pi already preserves this logical symlink. Binding its physical
         # target onto the symlink itself is both redundant and invalid on some

@@ -386,7 +386,7 @@ validate_reset_args() {
         return 0
     fi
 
-        deny_reset_destructive "git reset arguments not allowlisted"
+    deny_reset_destructive "git reset arguments not allowlisted"
 }
 
 validate_add_paths() {
