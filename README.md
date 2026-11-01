@@ -112,11 +112,14 @@ explanation. The wrapper's denials are authoritative — do not bypass them.
 The repository gates itself with [`just`](https://github.com/casey/just):
 
 ```sh
-just lint        # shellcheck across bin/*
+just lint        # shellcheck across bin/ + install.sh
 just fmt         # shfmt in-place
 just fmt-check   # shfmt diff-check (CI gate)
-just test        # bats: syntax + smoke suites
+just test        # bats: syntax + smoke + guard contracts
 just check       # lint + fmt-check + test — the one command before a commit
+just install     # ./install.sh --prefix ~/.local (PREFIX=DIR to override)
+just verify      # --version through the installed path
+just record      # render VHS demos to tapes/out/ (host-side: needs ttyd, ffmpeg, Chrome)
 ```
 
 Scope is Linux-only by design: Bubblewrap is the backend, and there is no

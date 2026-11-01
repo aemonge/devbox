@@ -33,5 +33,12 @@ install:
 verify:
     "${PREFIX:-$HOME/.local}/bin/devbox" --version
 
+# render the VHS demos into tapes/out/ (needs vhs: ttyd + ffmpeg + chrome;
+# typically a host-side step)
+record:
+    mkdir -p tapes/out
+    vhs tapes/intro.tape
+    vhs tapes/doctor.tape
+
 # aggregate gate
 check: lint fmt-check test

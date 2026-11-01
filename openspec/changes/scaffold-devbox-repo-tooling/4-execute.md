@@ -80,24 +80,35 @@
       implemented as two modes: copy (default, standalone) and --symlink
       (the live host convention from the prior change's ledger); both verify
       paths: install.sh, tests/install.bats, justfile, README.md, .gitignore
-- [ ] Commit `feat: add install script and just targets`
-      hash: pending
+- [x] Commit `feat: add install script and just targets`
+      hash: 640fb32
 
 ### Slice 5 — CI
 
-- [ ] .github/workflows/ci.yml — shellcheck, shfmt check, bats on
+- [x] .github/workflows/ci.yml — shellcheck, shfmt check, bats on
       ubuntu-latest; no sandbox launches
-      check: pending
-      paths: .github/workflows/ci.yml
-- [ ] Commit `ci: add lint and test workflow`
-      hash: pending
+      check: setup-just + apt shellcheck/shfmt/bats; the three recipes are
+      exactly the local gates; smoke tests were extended first with a
+      three-way capability model (no-bwrap CI / nested sandbox / capable
+      host) so CI asserts its own honest refusal branch — no fake green
+      paths: .github/workflows/ci.yml, tests/smoke.bats
+- [x] Commit `ci: add lint and test workflow`
+      hash: 761a82d
+      note: this commit's ledger entries (slice 4 hash + this block) landed
+      with the slice 6 commit — one-commit drift, recorded here
 
 ### Slice 6 — VHS tapes
 
-- [ ] tapes/*.tape (real invocations) + just record + one in-sandbox render
-      attempt (honest debt note on refusal)
-      check: pending
-      paths: tapes/
+- [x] tapes/*.tape (real invocations) + just record + one in-sandbox render
+      attempt
+      check: intro.tape (--version + --help) and doctor.tape (--doctor),
+      both wrapping real commands; in-sandbox render attempted and honestly
+      refused (headless Chrome: "browser exited unexpectedly before its
+      debugging endpoint was ready") — routed to
+      openspec/learnings/debt.md; `just record` documented as host-side;
+      README development section updated with all seven recipes
+      paths: tapes/intro.tape, tapes/doctor.tape, justfile, README.md,
+      openspec/learnings/debt.md
 - [ ] Commit `docs: add vhs demo tapes`
       hash: pending
 
@@ -205,3 +216,15 @@
   gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/.github/workflows/ci.yml · at 2026-11-01T10:51:29Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:51:33Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tapes/intro.tape · at 2026-11-01T10:52:08Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tapes/doctor.tape · at 2026-11-01T10:52:08Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/justfile · at 2026-11-01T10:52:08Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:52:10Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/README.md · at 2026-11-01T10:52:31Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:52:52Z
