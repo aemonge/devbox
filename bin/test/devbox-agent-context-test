@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly PI_GUARD="${SCRIPT_DIR}/../devbox-pi-guard"
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+readonly TEST_BIN="${TEST_ROOT}/pi"
+readonly CONTEXT_FILE="${TEST_ROOT}/agent-context.md"
+readonly TITLE_EXTENSION="${TEST_ROOT}/pi-title.ts"
+readonly CAPTURE="${TEST_ROOT}/args"
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+pass() { printf 'PASS: %s\n' "$1"; }
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
+
+[[ -x "${PI_GUARD}" ]] || fail "Pi guard is missing or not executable: ${PI_GUARD}"
+printf '# Devbox agent context\n' >"${CONTEXT_FILE}"
+printf 'export default function () {}\n' >"${TITLE_EXTENSION}"
+cat >"${TEST_BIN}" <<'PI'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\0' "$@" >"${DEVBOX_PI_GUARD_CAPTURE}"
+PI
+chmod +x "${TEST_BIN}"
+
+run_guard() {
+    rm -f -- "${CAPTURE}"
+    env -i \
+        PATH=/usr/bin:/bin \
+        DEVBOX_REAL_PI="${TEST_BIN}" \
+        DEVBOX_AGENT_CONTEXT_FILE="${CONTEXT_FILE}" \
+        DEVBOX_PI_GUARD_CAPTURE="${CAPTURE}" \
+        "${PI_GUARD}" "$@"
+}
+
+assert_args() {
+    local description="$1"
+    shift
+    local -a expected=("$@")
+    local -a actual=()
+    mapfile -d '' -t actual <"${CAPTURE}"
+    if [[ "${actual[*]}" != "${expected[*]}" || "${#actual[@]}" -ne "${#expected[@]}" ]]; then
+        fail "${description}: expected (${expected[*]}), got (${actual[*]})"
+    fi
+    pass "${description}"
+}
+
+run_guard_titled() {
+    rm -f -- "${CAPTURE}"
+    env -i \
+        PATH=/usr/bin:/bin \
+        DEVBOX_REAL_PI="${TEST_BIN}" \
+        DEVBOX_AGENT_CONTEXT_FILE="${CONTEXT_FILE}" \
+        DEVBOX_PI_TITLE_EXTENSION="${TITLE_EXTENSION}" \
+        DEVBOX_PI_GUARD_CAPTURE="${CAPTURE}" \
+        "${PI_GUARD}" "$@"
+}
+
+run_guard --mode rpc --no-session
+assert_args 'normal Pi launches append Devbox context once' \
+    --append-system-prompt "${CONTEXT_FILE}" --mode rpc --no-session
+
+run_guard --append-system-prompt user-context.md prompt
+assert_args 'existing Pi append instructions remain ordered after Devbox context' \
+    --append-system-prompt "${CONTEXT_FILE}" --append-system-prompt user-context.md prompt
+
+run_guard -nc --mode rpc
+assert_args 'explicit short context opt-out bypasses Devbox injection' -nc --mode rpc
+
+run_guard --no-context-files --mode rpc
+assert_args 'explicit long context opt-out bypasses Devbox injection' --no-context-files --mode rpc
+
+run_guard -- --no-context-files
+assert_args 'a prompt after the option delimiter does not disable injection' \
+    --append-system-prompt "${CONTEXT_FILE}" -- --no-context-files
+
+run_guard update --models
+assert_args 'Pi package commands bypass agent-context injection' update --models
+
+run_guard_titled --mode rpc --no-session
+assert_args 'title extension follows Devbox context for normal launches' \
+    --append-system-prompt "${CONTEXT_FILE}" --extension "${TITLE_EXTENSION}" --mode rpc --no-session
+
+run_guard_titled --extension user-extension.ts prompt
+assert_args 'user Pi extension flags are preserved after the Devbox title extension' \
+    --append-system-prompt "${CONTEXT_FILE}" --extension "${TITLE_EXTENSION}" --extension user-extension.ts prompt
+
+run_guard_titled -nc --mode rpc
+assert_args 'context opt-out also bypasses the title extension' -nc --mode rpc
+
+run_guard_titled update --models
+assert_args 'Pi package commands bypass the title extension' update --models
+
+rm -f -- "${CAPTURE}"
+if env -i \
+    PATH=/usr/bin:/bin \
+    DEVBOX_REAL_PI="${TEST_BIN}" \
+    DEVBOX_AGENT_CONTEXT_FILE="${CONTEXT_FILE}" \
+    DEVBOX_PI_TITLE_EXTENSION="${TEST_ROOT}/missing-title.ts" \
+    DEVBOX_PI_GUARD_CAPTURE="${CAPTURE}" \
+    "${PI_GUARD}" --mode rpc >/dev/null 2>&1; then
+    fail 'unreadable title extension unexpectedly reached real Pi'
+fi
+[[ ! -e "${CAPTURE}" ]] || fail 'unreadable title extension invoked real Pi before failing'
+pass 'unreadable title extension fails before the real executable'
+
+rm -f -- "${CAPTURE}"
+if env -i \
+    PATH=/usr/bin:/bin \
+    DEVBOX_REAL_PI="${TEST_BIN}" \
+    DEVBOX_AGENT_CONTEXT_FILE="${TEST_ROOT}/missing.md" \
+    DEVBOX_PI_GUARD_CAPTURE="${CAPTURE}" \
+    "${PI_GUARD}" --mode rpc >/dev/null 2>&1; then
+    fail 'missing context unexpectedly reached real Pi'
+fi
+[[ ! -e "${CAPTURE}" ]] || fail 'missing context invoked real Pi before failing'
+pass 'missing Pi context fails before the real executable'
+
+printf 'devbox agent context adapter tests passed\n'

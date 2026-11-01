@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+readonly TEST_BIN="${TEST_ROOT}/bin"
+readonly CAPTURE="${TEST_ROOT}/bwrap.args"
+readonly STDERR_LOG="${TEST_ROOT}/devbox.stderr"
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+mkdir -p -- "${TEST_BIN}"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${TEST_BIN}/devbox-git"
+cat >"${TEST_BIN}/bwrap" <<'BWRAP'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${1:-}" == --version ]]; then
+    printf 'bubblewrap 1.0.0\n'
+    exit 0
+fi
+if [[ "${1:-}" == --help ]]; then
+    printf '%s\n' --disable-userns
+    exit 0
+fi
+args=("$@")
+for ((index = 0; index < ${#args[@]}; index++)); do
+    if [[ "${args[index]}" == /bin/sh && "${args[index + 1]:-}" == -c ]]; then
+        exit 0
+    fi
+done
+printf '%s\0' "$@" >"${DEVBOX_SKILLS_CAPTURE}"
+BWRAP
+chmod +x "${TEST_BIN}/devbox-git" "${TEST_BIN}/bwrap"
+
+pass() { printf 'PASS: %s\n' "$1"; }
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
+
+run_box() {
+    local fixture_home="$1"
+    local fixture_target="$2"
+    shift 2
+
+    rm -f -- "${CAPTURE}" "${STDERR_LOG}"
+    env -i \
+        HOME="${fixture_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+        PATH="${TEST_BIN}:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 \
+        DEVBOX_GIT="${TEST_BIN}/devbox-git" DEVBOX_FORCE_PROBE=1 \
+        DEVBOX_SKILLS_CAPTURE="${CAPTURE}" \
+        "${DEVBOX}" /bin/true -- "${fixture_target}" -q \
+        --no-host-tools --no-aws --no-clipboard --no-ssh-agent "$@" \
+        2>"${STDERR_LOG}"
+}
+
+load_capture() {
+    [[ -f "${CAPTURE}" ]] || fail 'main Bubblewrap launch was not captured'
+    mapfile -d '' -t BWRAP_ARGS <"${CAPTURE}"
+}
+
+sequence_index() {
+    local expected_flag="$1"
+    local expected_source="$2"
+    local expected_destination="$3"
+    local index
+
+    REPLY=-1
+    for ((index = 0; index <= ${#BWRAP_ARGS[@]} - 3; index++)); do
+        if [[ "${BWRAP_ARGS[index]}" == "${expected_flag}" &&
+            "${BWRAP_ARGS[index + 1]}" == "${expected_source}" &&
+            "${BWRAP_ARGS[index + 2]}" == "${expected_destination}" ]]; then
+            REPLY="${index}"
+            return 0
+        fi
+    done
+    return 0
+}
+
+assert_sequence() {
+    local description="$1"
+    shift
+
+    sequence_index "$@"
+    [[ "${REPLY}" -ge 0 ]] || fail "${description}: missing sequence $*"
+    pass "${description}"
+}
+
+assert_sequence_absent() {
+    local description="$1"
+    shift
+
+    sequence_index "$@"
+    [[ "${REPLY}" -lt 0 ]] || fail "${description}: unexpected sequence $*"
+    pass "${description}"
+}
+
+assert_bind_count() {
+    local description="$1"
+    local expected_count="$2"
+    shift 2
+    local occurrences=0
+    local index
+
+    for ((index = 0; index <= ${#BWRAP_ARGS[@]} - 3; index++)); do
+        if [[ "${BWRAP_ARGS[index]}" == "$1" &&
+            "${BWRAP_ARGS[index + 1]}" == "$2" &&
+            "${BWRAP_ARGS[index + 2]}" == "$3" ]]; then
+            occurrences=$((occurrences + 1))
+        fi
+    done
+    [[ "${occurrences}" -eq "${expected_count}" ]] ||
+        fail "${description}: expected ${expected_count} occurrences of $*, found ${occurrences}"
+    pass "${description}"
+}
+
+assert_sequence_order_optional_first() {
+    local description="$1"
+    shift
+    local -a first=("$1" "$2" "$3")
+    shift 3
+    local -a second=("$1" "$2" "$3")
+
+    sequence_index "${first[@]}"
+    local first_index="${REPLY}"
+    sequence_index "${second[@]}"
+    local second_index="${REPLY}"
+    [[ "${second_index}" -ge 0 ]] || fail "${description}: missing ${second[*]}"
+    if [[ "${first_index}" -lt 0 ]]; then
+        pass "${description} (no overlay present)"
+        return 0
+    fi
+    ((first_index < second_index)) ||
+        fail "${description}: ${first[*]} at ${first_index} does not precede ${second[*]} at ${second_index}"
+    pass "${description}"
+}
+
+assert_stderr_contains() {
+    local description="$1"
+    local fragment="$2"
+
+    grep -F -q -- "${fragment}" "${STDERR_LOG}" || fail "${description}: stderr missing '${fragment}'"
+    pass "${description}"
+}
+
+assert_stderr_absent() {
+    local description="$1"
+    local fragment="$2"
+
+    if grep -F -q -- "${fragment}" "${STDERR_LOG}"; then
+        fail "${description}: stderr unexpectedly contains '${fragment}'"
+    fi
+    pass "${description}"
+}
+
+seed_pi_home() {
+    local fixture_home="$1"
+
+    mkdir -p -- \
+        "${fixture_home}/.agents/skills" \
+        "${fixture_home}/.pi/agent/skills" \
+        "${fixture_home}/.pi/agent/trust" \
+        "${fixture_home}/.pi/agent/scripts"
+    printf '{}\n' >"${fixture_home}/.pi/agent/settings.json"
+    printf '{"trusted":false}\n' >"${fixture_home}/.pi/agent/trust.json"
+}
+
+# Healthy symlinked children in both skills homes bind their targets read-only
+# at each target's own canonical path, exactly once per target.
+HOME_LINKS="${TEST_ROOT}/home-links"
+PROJECT_LINKS="${TEST_ROOT}/project-links"
+mkdir -p -- "${PROJECT_LINKS}" \
+    "${HOME_LINKS}/targets/join-src" \
+    "${HOME_LINKS}/targets/docs-src" \
+    "${HOME_LINKS}/targets/shared-src"
+seed_pi_home "${HOME_LINKS}"
+printf 'join-ok\n' >"${HOME_LINKS}/targets/join-src/marker"
+printf 'docs-ok\n' >"${HOME_LINKS}/targets/docs-src/marker"
+ln -s "${HOME_LINKS}/targets/join-src" "${HOME_LINKS}/.agents/skills/join"
+ln -s "${HOME_LINKS}/targets/docs-src" "${HOME_LINKS}/.pi/agent/skills/docs"
+ln -s "${HOME_LINKS}/targets/shared-src" "${HOME_LINKS}/.agents/skills/twin-agents"
+ln -s "${HOME_LINKS}/targets/shared-src" "${HOME_LINKS}/.pi/agent/skills/twin-pi"
+mkdir -- "${HOME_LINKS}/.agents/skills/plain" "${HOME_LINKS}/.pi/agent/skills/plain"
+
+run_box "${HOME_LINKS}" "${PROJECT_LINKS}"
+load_capture
+assert_sequence 'agents skills link target binds read-only at its canonical path' \
+    --ro-bind "${HOME_LINKS}/targets/join-src" "${HOME_LINKS}/targets/join-src"
+assert_sequence 'Pi skills link target binds read-only at its canonical path' \
+    --ro-bind "${HOME_LINKS}/targets/docs-src" "${HOME_LINKS}/targets/docs-src"
+assert_sequence_absent 'skills link targets never bind writable' \
+    --bind "${HOME_LINKS}/targets/join-src" "${HOME_LINKS}/targets/join-src"
+assert_bind_count 'one target shared by both homes binds exactly once' 1 \
+    --ro-bind "${HOME_LINKS}/targets/shared-src" "${HOME_LINKS}/targets/shared-src"
+assert_sequence_absent 'plain skills children add no canonical binds' \
+    --ro-bind "${HOME_LINKS}/.agents/skills/plain" "${HOME_LINKS}/.agents/skills/plain"
+assert_stderr_absent 'healthy links start without skills warnings' 'skills symlink'
+
+# Broken, file, and escaping links only warn and never block startup.
+HOME_SKIP="${TEST_ROOT}/home-skip"
+PROJECT_SKIP="${TEST_ROOT}/project-skip"
+mkdir -p -- "${PROJECT_SKIP}" "${HOME_SKIP}/targets"
+seed_pi_home "${HOME_SKIP}"
+printf 'not-a-directory\n' >"${HOME_SKIP}/targets/afile"
+ln -s "${HOME_SKIP}/targets/gone" "${HOME_SKIP}/.agents/skills/broken"
+ln -s /usr/share "${HOME_SKIP}/.agents/skills/escape"
+ln -s "${HOME_SKIP}/targets/afile" "${HOME_SKIP}/.pi/agent/skills/filey"
+
+run_box "${HOME_SKIP}" "${PROJECT_SKIP}"
+load_capture
+assert_stderr_contains 'dangling skills link warns without a directory target' \
+    'without a directory target: '
+assert_stderr_contains 'the dangling link itself is named in the warning' \
+    "${HOME_SKIP}/.agents/skills/broken"
+assert_stderr_contains 'a file target is also skipped with a warning' \
+    "${HOME_SKIP}/.pi/agent/skills/filey"
+assert_stderr_contains 'an escaping target warns' 'escaping HOME: '
+assert_stderr_contains 'the escaping link itself is named in the warning' \
+    "${HOME_SKIP}/.agents/skills/escape"
+assert_sequence_absent 'dangling targets never bind' \
+    --ro-bind "${HOME_SKIP}/targets/gone" "${HOME_SKIP}/targets/gone"
+assert_sequence_absent 'escaping targets never bind' \
+    --ro-bind /usr/share /usr/share
+
+# A skills link pointing at the opened project never shadows the project bind.
+HOME_PROJECT="${TEST_ROOT}/home-project"
+mkdir -p -- "${HOME_PROJECT}/proj"
+seed_pi_home "${HOME_PROJECT}"
+printf 'readme\n' >"${HOME_PROJECT}/proj/readme"
+ln -s "${HOME_PROJECT}/proj" "${HOME_PROJECT}/.agents/skills/proj"
+
+run_box "${HOME_PROJECT}" "${HOME_PROJECT}/proj"
+load_capture
+assert_sequence 'the opened project still binds writable' \
+    --bind "${HOME_PROJECT}/proj" "${HOME_PROJECT}/proj"
+assert_sequence_order_optional_first 'any skills overlay precedes the project bind' \
+    --ro-bind "${HOME_PROJECT}/proj" "${HOME_PROJECT}/proj" \
+    --bind "${HOME_PROJECT}/proj" "${HOME_PROJECT}/proj"
+
+run_box "${HOME_PROJECT}" "${HOME_PROJECT}/proj" --locked
+load_capture
+assert_sequence 'locked projects bind read-only' \
+    --ro-bind "${HOME_PROJECT}/proj" "${HOME_PROJECT}/proj"
+assert_sequence_absent 'locked projects never bind writable' \
+    --bind "${HOME_PROJECT}/proj" "${HOME_PROJECT}/proj"
+
+# Skills homes without symlinked children start unchanged.
+HOME_PLAIN="${TEST_ROOT}/home-plain"
+PROJECT_PLAIN="${TEST_ROOT}/project-plain"
+mkdir -p -- "${PROJECT_PLAIN}"
+seed_pi_home "${HOME_PLAIN}"
+mkdir -- "${HOME_PLAIN}/.agents/skills/plain" "${HOME_PLAIN}/.pi/agent/skills/plain"
+
+run_box "${HOME_PLAIN}" "${PROJECT_PLAIN}"
+load_capture
+assert_stderr_absent 'plain homes emit no skills warnings' 'skills symlink'
+assert_sequence 'plain skills directories keep their normal mounts' \
+    --ro-bind "${HOME_PLAIN}/.pi/agent/skills" "${HOME_PLAIN}/.pi/agent/skills"
+
+printf 'devbox skills-home symlink tests passed\n'

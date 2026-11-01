@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+readonly DEVBOX_GIT="${SCRIPT_DIR}/../devbox-git"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/devbox-pty-test.XXXXXX")"
+readonly TEST_ROOT
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+readonly TEST_HOME="${TEST_ROOT}/home"
+readonly TEST_PROJECT="${TEST_ROOT}/project"
+readonly PTY_LAUNCHER="${TEST_ROOT}/launch-under-pty"
+mkdir -p -- "${TEST_HOME}/.pi/agent" "${TEST_PROJECT}"
+printf '{}\n' >"${TEST_HOME}/.pi/agent/settings.json"
+
+command -v script >/dev/null 2>&1 || {
+    printf 'FAIL: util-linux script is required for the real PTY regression test\n' >&2
+    exit 1
+}
+
+cat >"${PTY_LAUNCHER}" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+: "${DEVBOX_PTY_TEST_DEVBOX:?}"
+: "${DEVBOX_PTY_TEST_HOME:?}"
+: "${DEVBOX_PTY_TEST_PROJECT:?}"
+: "${DEVBOX_PTY_TEST_DEVBOX_GIT:?}"
+
+env -i \
+    HOME="${DEVBOX_PTY_TEST_HOME}" \
+    USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+    PATH=/usr/local/bin:/usr/bin:/bin TERM=xterm-256color LANG=C.UTF-8 \
+    DEVBOX_GIT="${DEVBOX_PTY_TEST_DEVBOX_GIT}" DEVBOX_FORCE_PROBE=1 \
+    "${DEVBOX_PTY_TEST_DEVBOX}" /bin/bash --noprofile --norc -c '
+        set -Eeuo pipefail
+        tty_path="$(tty)"
+        [[ "${tty_path}" =~ ^/dev/pts/[0-9]+$ ]]
+        [[ -c "${tty_path}" ]]
+        for fd in 0 1 2; do
+            [[ -t "${fd}" ]]
+        done
+        pgid="$(ps -o pgid= -p "$$" | tr -d " ")"
+        tpgid="$(ps -o tpgid= -p "$$" | tr -d " ")"
+        [[ "${tpgid}" != -1 && "${pgid}" == "${tpgid}" ]]
+        grep -F " ${tty_path} " /proc/self/mountinfo >/dev/null
+        printf "PTY_OK path=%s pgid=%s tpgid=%s\n" "${tty_path}" "${pgid}" "${tpgid}"
+    ' -- "${DEVBOX_PTY_TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+LAUNCHER
+chmod +x "${PTY_LAUNCHER}"
+
+# Isolate ambient terminal input while the child still owns script's slave PTY.
+if output="$(
+    DEVBOX_PTY_TEST_DEVBOX="${DEVBOX}" \
+        DEVBOX_PTY_TEST_HOME="${TEST_HOME}" \
+        DEVBOX_PTY_TEST_PROJECT="${TEST_PROJECT}" \
+        DEVBOX_PTY_TEST_DEVBOX_GIT="${DEVBOX_GIT}" \
+        script -qefc "${PTY_LAUNCHER}" /dev/null </dev/null | tr -d '\r'
+)" && [[ "${output}" == PTY_OK\ path=/dev/pts/* ]]; then
+    printf 'PASS: restricted devbox preserves the exact active PTY and foreground process group\n'
+else
+    printf 'FAIL: restricted devbox PTY fidelity check failed (%s)\n' "${output:-no output}" >&2
+    exit 1
+fi
+
+printf 'devbox PTY integration tests passed\n'

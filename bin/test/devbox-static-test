@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # Assertions intentionally match literal shell source.
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+readonly DEVBOX_GIT="${SCRIPT_DIR}/../devbox-git"
+readonly DEVBOX_PI_GUARD="${SCRIPT_DIR}/../devbox-pi-guard"
+readonly DEVBOX_AGENT_CONTEXT="${SCRIPT_DIR}/../devbox-agent-context.md"
+
+[[ -x "${DEVBOX}" ]] || {
+    printf 'FAIL: devbox executable missing: %s\n' "${DEVBOX}" >&2
+    exit 1
+}
+[[ -x "${DEVBOX_GIT}" ]] || {
+    printf 'FAIL: devbox-git executable missing: %s\n' "${DEVBOX_GIT}" >&2
+    exit 1
+}
+[[ -x "${DEVBOX_PI_GUARD}" ]] || {
+    printf 'FAIL: Devbox Pi guard missing: %s\n' "${DEVBOX_PI_GUARD}" >&2
+    exit 1
+}
+[[ -r "${DEVBOX_AGENT_CONTEXT}" ]] || {
+    printf 'FAIL: Devbox agent context missing: %s\n' "${DEVBOX_AGENT_CONTEXT}" >&2
+    exit 1
+}
+
+assert_contains() {
+    local description="$1"
+    local text="$2"
+    if grep -F -q -- "${text}" "${DEVBOX}"; then
+        printf 'PASS: %s\n' "${description}"
+    else
+        printf 'FAIL: %s (missing %s)\n' "${description}" "${text}" >&2
+        exit 1
+    fi
+}
+
+assert_absent() {
+    local description="$1"
+    local text="$2"
+    if grep -F -q -- "${text}" "${DEVBOX}"; then
+        printf 'FAIL: %s (unexpected %s)\n' "${description}" "${text}" >&2
+        exit 1
+    fi
+    printf 'PASS: %s\n' "${description}"
+}
+
+assert_contains 'identifies the unified command' 'readonly PROGRAM_NAME="devbox"'
+assert_contains 'uses command-first parsing' 'DEVBOX_COMMAND+=("$1")'
+assert_contains 'supports a literal child delimiter' 'DEVBOX_COMMAND+=(--)'
+assert_contains 'defaults to an interactive Zsh login shell' 'RAW_COMMAND=("${DEVBOX_SHELL:-zsh}" -l)'
+assert_contains 'mounts the zsh configuration tree' 'opt_ro_bind_dir "${HOST_HOME}/.config/zsh" "${SANDBOX_HOME}/.config/zsh"'
+assert_contains 'shares the zinit plugin manager with the sandbox' 'bind_runtime_dir "${HOST_HOME}/.local/share/zinit" "${SANDBOX_HOME}/.local/share/zinit"'
+assert_absent 'does not expose a box/profile selector' '--box'
+assert_absent 'does not advertise an exec mode' '-x, --exec'
+assert_contains 'uses a writable target by default' 'FS_MODE="${DEVBOX_FS_MODE:-rw}"'
+assert_contains 'protects critical infrastructure by default' 'ALLOW_INFRA=0'
+assert_contains 'fails closed on conflicting mount destinations' 'conflicting mount policy for ${sand_p}'
+assert_contains 'keeps Git writable under the Devbox policy wrapper' 'ALLOW_GIT=1'
+assert_contains 'defaults to the canonical devbox-git entry point' '${SCRIPT_DIR}/devbox-git'
+assert_contains 'supports an explicit Devbox Git wrapper override' '${DEVBOX_GIT:-${SCRIPT_DIR}/devbox-git}'
+assert_contains 'mounts separate read-only agent guidance' '--ro-bind "${DEVBOX_AGENT_CONTEXT_HOST}" "${DEVBOX_AGENT_CONTEXT_SANDBOX}"'
+assert_contains 'marks sandbox processes as active Devbox processes' '--setenv DEVBOX_ACTIVE 1'
+assert_contains 'exports the selected project root' '--setenv DEVBOX_PROJECT_ROOT "${SANDBOX_PROJECT_ROOT}"'
+assert_contains 'points processes to the agent context file' '--setenv DEVBOX_AGENT_CONTEXT_FILE "${DEVBOX_AGENT_CONTEXT_SANDBOX}"'
+assert_contains 'routes Pi through the sandbox context guard' 'prepare_pi_command_guard'
+assert_contains 'adds Devbox context to OpenCode instructions' 'add_sandbox_env_once OPENCODE_CONFIG_CONTENT'
+assert_contains 'reports the policy-wrapped Git boundary' '--setenv DEVBOX_GIT_POLICY wrapped'
+assert_contains 'rejects writable host-root targets' 'refusing to mount the host root writable'
+assert_contains 'assembles one canonical Pi resource closure' 'assemble_pi_agent_resource_closure'
+assert_contains 'assembles Pi at the resolved symlink destination' 'SANDBOX_PI_AGENT_ASSEMBLY_DIR'
+assert_contains 'applies Pi mounts after project binds' 'BWRAP_CMD+=("${PI_BINDS[@]}")'
+assert_contains 'includes root Pi context explicitly' '    AGENTS.md'
+assert_contains 'persists existing Pi credentials through an exact writable bind' 'PI_AGENT_CREDENTIAL_FILES'
+assert_contains 'keeps other Pi root configuration read-only' 'PI_AGENT_ROOT_CONFIG_FILES'
+assert_contains 'keeps the Pi npm package tree read-only by default' '    npm'
+assert_contains 'discovers configured absolute local Pi packages' 'bind_pi_absolute_local_packages'
+assert_contains 'keeps configured absolute local Pi packages read-only' 'add_pi_prepared_bind_once --ro-bind "${package_source}" "${package_source}"'
+assert_contains 'rejects missing configured absolute local Pi packages' 'configured absolute local Pi package does not exist'
+assert_contains 'confines automatic local Pi packages to the user home' 'configured absolute local Pi package is outside the safe home scope'
+assert_contains 'prevents local Pi packages from shadowing protected mounts' 'configured absolute local Pi package contains a protected mount'
+assert_contains 'rejects symlink aliases before mounting local Pi packages' 'configured absolute local Pi package path must resolve canonically'
+assert_contains 'discovers local Pi packages after ordinary mount destinations' 'bind_pi_absolute_local_packages'
+assert_contains 'requires explicit authorization outside the safe package scope' 'authorize it explicitly with --add'
+assert_contains 'keeps locked mode authoritative over writable package additions' 'configured absolute local Pi package cannot be writable in locked mode'
+assert_contains 'restores Pi scripts read-only by default' '    scripts'
+assert_contains 'rejects symlinked writable Pi state' 'refusing symlinked writable Pi state'
+assert_contains 'detects portable state leaves in a real agent root' 'portable_state_symlink=1'
+assert_contains 'uses independent state for non-local or managed Pi roots' 'PI_AGENT_STATE_SOURCE_ROOT="${HOST_HOME}/.local/state/devbox/pi-agent"'
+assert_contains 'shares regular default-root sessions with host Pi' 'PI_AGENT_SESSION_SOURCE_DIR="${PI_AGENT_DIR}/sessions"'
+assert_contains 'seeds the machine-local Pi Git cache without rewriting portable state' 'seed_independent_pi_git_cache'
+assert_contains 'normalizes the local trust directory mode' 'chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust"'
+assert_contains 'normalizes an existing local trust file mode' 'chmod 0600 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust.json"'
+assert_absent 'does not treat trust.json as portable root configuration' '    trust.json'
+assert_contains 'persists only the named Ramona XDG state namespace' 'bind_runtime_dir_precreated "${host_state_ramona}" "${sand_state_ramona}"'
+assert_contains 'keeps persisted Ramona state owner-only' 'chmod 0700 -- "${host_state_ramona}"'
+assert_absent 'does not bind the complete XDG state tree' 'bind_runtime_dir "${XDG_STATE_HOME:-${HOST_HOME}/.local/state}"'
+assert_contains 'restores global Pi agents read-only' '    agents'
+assert_contains 'restores saved Pi Taskflows read-only' '    taskflows'
+assert_contains 'mounts only user OpenSpec schemas' 'bind_user_openspec_schemas'
+assert_contains 'keeps user OpenSpec schemas read-only' 'add_prepared_bind_once --ro-bind "${host_schemas}" "${sandbox_schemas}"'
+assert_contains 'pins the Pi agent root' '--setenv PI_CODING_AGENT_DIR "${SANDBOX_PI_AGENT_DIR}"'
+assert_contains 'mounts OpenCode development state' 'bind_opencode_state'
+assert_contains 'mounts symlinked OpenCode resource targets' 'bind_symlink_targets_in_dir'
+assert_contains 'runs OpenCode plugin integrity before direct launches' 'run_opencode_plugin_preflight'
+assert_contains 'guards OpenCode launched later from an interactive shell' 'prepare_opencode_command_guard'
+assert_contains 'runs comprehensive live parity validation' 'test/devbox-live-test'
+assert_contains 'runs extended unified live validation' 'test/devbox-live-extended-test'
+assert_contains 'runs focused agent-context adapter validation' 'test/devbox-agent-context-test'
+assert_contains 'runs focused Pi state isolation validation' 'test/devbox-pi-state-test'
+assert_contains 'runs real Pi parity and symlink-mount validation' 'test/devbox-pi-parity-test'
+assert_contains 'runs real controlling-PTY validation' 'test/devbox-pty-test'
+assert_contains 'runs adversarial discovery-cache validation' 'test/devbox-cache-test'
+assert_contains 'runs focused devbox-git identity validation' 'test/devbox-git-identity-test'
+assert_contains 'runs focused devbox-git policy validation' 'test/devbox-git-policy-test'
+assert_contains 'runs exhaustive OpenCode integrity validation' 'test/devbox-opencode-integrity-test'
+assert_contains 'runs OpenCode startup preflight validation' 'test/devbox-opencode-preflight-test'
+assert_contains 'supports live Neovim OpenCode ports' 'apply_nvim_opencode_port_default'
+assert_contains 'mounts host Neovim resources without making configuration writable' 'bind_nvim_resources'
+assert_contains 'keeps host Neovim configuration read-only' 'add_prepared_bind_once --ro-bind "${host_nvim_config}" "${sandbox_nvim_config}"'
+assert_contains 'uses dedicated writable data for missing Neovim plugins' 'bind_prepared_runtime_dir "${host_devbox_nvim_lazy}" "${sandbox_nvim_data}/lazy"'
+assert_contains 'keeps existing Neovim plugins read-only' 'add_prepared_bind_once --ro-bind "${plugin_path}"'
+assert_contains 'uses an exact devbox-backed writable lazy lockfile' '"${sandbox_nvim_config}/lazy-lock.json"'
+assert_contains 'requires an existing lockfile mountpoint under the mounted read-only Neovim config' 'if [[ -f "${host_nvim_lock}" && "${nvim_config_mounted}" -eq 1 ]]'
+assert_contains 'keeps Neovim runtime state writable' 'bind_runtime_dir "${host_nvim_state}" "${sandbox_nvim_state}"'
+assert_contains 'shares Neovim editor handoff state with the host' '"${SANDBOX_HOME}/.local/state/opencode"'
+assert_contains 'expands Cargo workspace targets' 'cargo_workspace_expand_target'
+assert_contains 'enables AWS by default' 'ALLOW_AWS="${DEVBOX_AWS:-1}"'
+assert_contains 'supports disabling AWS' '--no-aws'
+assert_contains 'keeps AWS configuration read-only' 'opt_ro_bind_dir "${host_aws_dir}" "${sandbox_aws_dir}"'
+assert_contains 'rejects missing custom AWS files' '${env_name} does not name a readable file'
+assert_contains 'keeps AWS SSO cache writable' '"${host_aws_dir}/sso/cache"'
+assert_contains 'enables clipboard by default' 'ALLOW_CLIPBOARD="${DEVBOX_CLIPBOARD:-1}"'
+assert_contains 'supports disabling clipboard' '--no-clipboard'
+assert_contains 'forwards exact Wayland sockets' 'bind_runtime_path_precreated "${wayland_socket}"'
+assert_contains 'forwards exact X11 sockets' 'bind_runtime_path_precreated "${x11_socket}"'
+assert_contains 'supports network isolation' '--unshare-net'
+assert_contains 'supports host-tool hardening' '--no-host-tools'
+assert_contains 'supports an order-independent hardened preset' 'LOCKED_MODE=1'
+assert_contains 'keeps locked-mode tool state ephemeral' 'EPHEMERAL_STATE=1'
+assert_contains 'supports disabling terminal control sockets' '--no-terminal-sockets'
+assert_contains 'fails clearly for unavailable commands' 'command not found or not executable: ${command_token}'
+assert_contains 'supports SSH-agent hardening' '--no-ssh-agent'
+assert_contains 'supports SSH-agent opt-in' '-s | --ssh-agent'
+assert_contains 'prepares narrow SSH client integration' 'prepare_ssh_client_integration'
+assert_contains 'copies system SSH snippets into sandbox-owned files' '--file "${config_fd}" "/etc/ssh/ssh_config.d/${config_name}"'
+assert_contains 'makes copied system SSH snippets read-only' '--remount-ro /etc/ssh/ssh_config.d'
+assert_contains 'copies user SSH config read-only' '--ro-bind-data "${config_fd}" "${SANDBOX_HOME}/.ssh/config"'
+assert_contains 'seeds ephemeral known hosts without host writes' '--file "${known_hosts_fd}" "${SANDBOX_HOME}/.ssh/${known_hosts_name}"'
+assert_contains 'exposes only public SSH key companions' 'find "${host_ssh_dir}" -type f -name '\''*.pub'\'' -print0'
+assert_absent 'does not bind the complete SSH directory' '--bind "${HOST_HOME}/.ssh"'
+assert_absent 'does not expose private SSH identity files' 'ssh-keys/personal/aemonge'
+assert_contains 'uses exact terminal socket integration' 'bind_tmux_socket_env'
+assert_contains 'derives the active PTY from the real launch' 'discover_active_pty'
+assert_contains 'limits exact PTY overlays to restricted device mode' 'if [[ "${RESTRICT_DEV}" -eq 1 && -n "${ACTIVE_PTY_PATH}" ]]'
+assert_contains 'mounts only the exact active PTY endpoint' '--dev-bind "${ACTIVE_PTY_PATH}" "${ACTIVE_PTY_PATH}"'
+assert_absent 'does not bind the complete host PTY tree' '--dev-bind /dev/pts /dev/pts'
+assert_contains 'supports GUI developer mode' '--web-developer'
+assert_contains 'uses atomic single-file copyback' 'mv -f -- "${temporary_target}" "${TARGET_SOURCE_PATH}"'
+assert_contains 'keeps internal mount machinery in a sandbox-private directory' 'DEVBOX_INTERNAL_TMPDIR="/tmp/devbox-internal-$$"'
+assert_contains 'defaults to a sandbox-private child TMPDIR' 'DEVBOX_TMPDIR="/tmp/devbox-$$"'
+assert_contains 'shares runtime only for an exact active Neovim socket' '[[ -n "${NVIM:-}" && "${NVIM}" == /* && -S "${NVIM}" ]] || return 0'
+assert_contains 'creates one owner-only per-run Neovim runtime' 'mktemp -d "${DEVBOX_EDITOR_RUNTIME_BASE}/run.$$.${process_started}.XXXXXXXX"'
+assert_contains 'exact-binds only the per-run Neovim runtime' 'add_extra_bind_once --bind "${DEVBOX_TMPDIR}" "${DEVBOX_TMPDIR}"'
+assert_contains 'uses the shared runtime for editor FIFOs and Pi temporary files' 'add_sandbox_env_once XDG_RUNTIME_DIR "${DEVBOX_TMPDIR}"'
+assert_contains 'keeps Pi state mount machinery out of the shared editor runtime' 'local state_mirror="${DEVBOX_INTERNAL_TMPDIR}/pi-agent-state"'
+assert_contains 'prunes runtimes only after their exact creating process lifetime ends' '[[ -n "${current_started}" && "${current_started}" == "${started}" ]] && continue'
+assert_contains 'remaps the exact Wayland socket into the shared editor runtime' 'sandbox_wayland_socket="${DEVBOX_TMPDIR}/${wayland_display}"'
+assert_contains 'uses a devbox-specific discovery cache' '"${HOST_HOME}/.cache/devbox"'
+assert_contains 'validates discovery-cache ownership' 'stat -c %u -- "${DEVBOX_DISCOVERY_CACHE}"'
+assert_contains 'parses only whitelisted discovery-cache keys' 'read_discovery_cache'
+assert_contains 'encodes discovery-cache values as inert data' 'base64 --wrap=0'
+assert_absent 'never executes discovery-cache content as shell code' 'source "${DEVBOX_DISCOVERY_CACHE}"'
+assert_contains 'writes discovery cache atomically' 'mv -f -- "${temporary_cache}" "${DEVBOX_DISCOVERY_CACHE}"'
+assert_contains 'mounts system trees read-only' '--ro-bind /usr /usr'
+assert_contains 'restores restricted file-descriptor compatibility' '--symlink /proc/self/fd /dev/fd'
+assert_contains 'restores restricted standard input compatibility' '--symlink /proc/self/fd/0 /dev/stdin'
+assert_contains 'restores restricted standard output compatibility' '--symlink /proc/self/fd/1 /dev/stdout'
+assert_contains 'restores restricted standard error compatibility' '--symlink /proc/self/fd/2 /dev/stderr'
+assert_absent 'does not bind the complete host device tree' '--dev-bind /dev /dev'
+assert_contains 'uses a disposable home root' '--tmpfs /home'
+assert_contains 'uses a disposable temporary root' '--tmpfs /tmp'
+assert_contains 'clears inherited environment' '--clearenv'
+assert_contains 'dies with its parent' '--die-with-parent'
+assert_absent 'does not bind the entire host home writable' '--bind "${HOST_HOME}" "${SANDBOX_HOME}"'
+
+printf 'devbox static policy tests passed\n'

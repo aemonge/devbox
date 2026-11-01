@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+DEVBOX_GIT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)/devbox-git"
+readonly DEVBOX_GIT
+
+FAILED=0
+
+fail() {
+    printf '❌ %s\n' "$*" >&2
+    FAILED=$((FAILED + 1))
+}
+
+pass() {
+    printf '✅ %s\n' "$*"
+}
+
+run_devbox_git() {
+    local tmpdir="$1"
+    shift
+
+    DEVBOX_REAL_GIT="${tmpdir}/fake-git" \
+        DEVBOX_GIT_TEST_LOG="${tmpdir}/git.log" \
+        "${DEVBOX_GIT}" "$@"
+}
+
+assert_denied() {
+    local tmpdir="$1"
+    local name="$2"
+    shift 2
+
+    local output=""
+    if output="$(run_devbox_git "${tmpdir}" "$@" 2>&1)"; then
+        fail "${name}: command unexpectedly succeeded"
+        return
+    fi
+
+    if grep -qE 'Denied|BLOCKED|fatal: devbox blocked' <<<"${output}"; then
+        pass "${name}"
+    else
+        fail "${name}: expected denial, got: ${output}"
+    fi
+}
+
+assert_denied_before_real_git() {
+    local tmpdir="$1"
+    local name="$2"
+    shift 2
+
+    local output=""
+    : >"${tmpdir}/git.log"
+    if output="$(run_devbox_git "${tmpdir}" "$@" 2>&1)"; then
+        fail "${name}: command unexpectedly succeeded"
+        return
+    fi
+
+    if [[ -s "${tmpdir}/git.log" ]]; then
+        fail "${name}: real git was invoked: $(<"${tmpdir}/git.log")"
+    elif grep -qE 'Denied|BLOCKED|fatal: devbox blocked' <<<"${output}"; then
+        pass "${name}"
+    else
+        fail "${name}: expected denial, got: ${output}"
+    fi
+}
+
+assert_denied_stdout_visible() {
+    local tmpdir="$1"
+    local name="$2"
+    shift 2
+
+    local stdout_file="${tmpdir}/stdout.txt"
+    local stderr_file="${tmpdir}/stderr.txt"
+    local status=0
+
+    run_devbox_git "${tmpdir}" "$@" >"${stdout_file}" 2>"${stderr_file}" || status=$?
+
+    if [[ "${status}" -eq 0 ]]; then
+        fail "${name}: command unexpectedly succeeded"
+        return
+    fi
+
+    if grep -qE 'Denied|BLOCKED|fatal: devbox blocked' "${stdout_file}" && grep -qE 'Denied|BLOCKED|fatal: devbox blocked' "${stderr_file}"; then
+        pass "${name}"
+    else
+        fail "${name}: denial not visible on both stdout and stderr (stdout=$(<"${stdout_file}"), stderr=$(<"${stderr_file}"))"
+    fi
+}
+
+assert_denied_with_hint() {
+    local tmpdir="$1"
+    local name="$2"
+    local expected_hint="$3"
+    shift 3
+
+    local output=""
+    if output="$(run_devbox_git "${tmpdir}" "$@" 2>&1)"; then
+        fail "${name}: command unexpectedly succeeded"
+        return
+    fi
+
+    if [[ "${output}" == *"hint: Assistant:"* && "${output}" == *"${expected_hint}"* ]]; then
+        pass "${name}"
+    else
+        fail "${name}: missing assistant hint '${expected_hint}', got: ${output}"
+    fi
+}
+
+assert_push_denied_as_fatal() {
+    local tmpdir="$1"
+    local name="$2"
+
+    local output=""
+    local status=0
+    output="$(run_devbox_git "${tmpdir}" push 2>&1)" || status=$?
+
+    if [[ "${status}" -ne 128 ]]; then
+        fail "${name}: expected exit 128, got ${status}; output=${output}"
+        return
+    fi
+
+    if [[ "${output}" == *"fatal: devbox blocked git push"* &&
+        "${output}" == *"no push was performed"* ]]; then
+        pass "${name}"
+    else
+        fail "${name}: missing fatal blocked push message; output=${output}"
+    fi
+}
+
+assert_allowed() {
+    local tmpdir="$1"
+    local name="$2"
+    shift 2
+
+    local output=""
+    if ! output="$(run_devbox_git "${tmpdir}" "$@" 2>&1)"; then
+        fail "${name}: command failed: ${output}"
+        return
+    fi
+
+    if grep -q '^REAL_GIT ' "${tmpdir}/git.log"; then
+        pass "${name}"
+    else
+        fail "${name}: real git was not invoked"
+    fi
+}
+
+assert_forwarded_exactly() {
+    local tmpdir="$1"
+    local name="$2"
+    shift 2
+
+    local output=""
+    : >"${tmpdir}/git.log"
+    if ! output="$(run_devbox_git "${tmpdir}" "$@" 2>&1)"; then
+        fail "${name}: command failed: ${output}"
+        return
+    fi
+
+    local expected=""
+    printf -v expected 'REAL_GIT %q' "${tmpdir}/fake-git"
+    local arg
+    for arg in "$@"; do
+        printf -v expected '%s %q' "${expected}" "${arg}"
+    done
+
+    local actual
+    actual="$(<"${tmpdir}/git.log")"
+    if [[ "${actual}" == "${expected}" ]]; then
+        pass "${name}"
+    else
+        fail "${name}: expected exact forwarding '${expected}', got '${actual}'"
+    fi
+}
+
+assert_commit_hardened() {
+    local tmpdir="$1"
+    local name="$2"
+    shift 2
+
+    : >"${tmpdir}/git.log"
+    assert_allowed "${tmpdir}" "${name}" "$@"
+
+    local log_content
+    log_content="$(<"${tmpdir}/git.log")"
+    if [[ "${log_content}" == *'-c core.hooksPath=/dev/null'* &&
+        "${log_content}" == *'-c commit.gpgsign=false'* &&
+        "${log_content}" == *'-c core.editor=true'* ]]; then
+        pass "${name}: commit hardening flags present"
+    else
+        fail "${name}: missing commit hardening flags: ${log_content}"
+    fi
+}
+
+main() {
+    if [[ ! -x "${DEVBOX_GIT}" ]]; then
+        fail "devbox-git executable is missing: ${DEVBOX_GIT}"
+        return 1
+    fi
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    # shellcheck disable=SC2064 # Capture the local temp path before main returns.
+    trap "rm -rf -- '${tmpdir}'" EXIT
+
+    cat >"${tmpdir}/fake-git" <<'FAKE_GIT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'REAL_GIT %q' "$0" >>"${DEVBOX_GIT_TEST_LOG}"
+printf ' %q' "$@" >>"${DEVBOX_GIT_TEST_LOG}"
+printf '\n' >>"${DEVBOX_GIT_TEST_LOG}"
+    scope_dir=""
+    first_arg="${1:-}"
+    second_arg="${2:-}"
+
+    if [[ "${first_arg}" == "-C" ]]; then
+        scope_dir="${second_arg}"
+        shift 2
+        first_arg="${1:-}"
+    fi
+
+    case "${first_arg}" in
+    rev-parse)
+        if [[ "${2:-}" == "--show-toplevel" ]]; then
+            if [[ -n "${scope_dir}" ]]; then
+                if [[ "${scope_dir}" = /* ]]; then
+                    realpath -m -- "${scope_dir}"
+                else
+                    realpath -m -- "${PWD}/${scope_dir}"
+                fi
+            else
+                pwd
+            fi
+            exit 0
+        fi
+        ;;
+    esac
+
+    # Keep fake git permissive for all other invocations.
+    :
+exit 0
+FAKE_GIT
+    chmod +x "${tmpdir}/fake-git"
+    : >"${tmpdir}/git.log"
+
+    assert_allowed "${tmpdir}" "allows git status" status
+    assert_allowed "${tmpdir}" "allows git diff" diff -- README.md
+    assert_forwarded_exactly "${tmpdir}" "allows exact bounded git diff-tree inspection" diff-tree --no-commit-id --name-only -r HEAD
+    assert_allowed "${tmpdir}" "allows lock-free Fancy Footer status" --no-optional-locks status --porcelain=2 --branch
+    assert_allowed "${tmpdir}" "allows lock-free Fancy Footer diff" --no-optional-locks diff --numstat HEAD
+    assert_allowed "${tmpdir}" "allows git merge-base" merge-base main feature/test
+    assert_allowed "${tmpdir}" "allows git merge-base --is-ancestor" merge-base --is-ancestor main feature/test
+    assert_allowed "${tmpdir}" "allows git for-each-ref" for-each-ref refs/heads
+    assert_allowed "${tmpdir}" "allows git symbolic-ref" symbolic-ref --short HEAD
+    assert_allowed "${tmpdir}" "allows git cat-file" cat-file -e 'HEAD^{commit}'
+    assert_allowed "${tmpdir}" "allows git name-rev" name-rev --name-only HEAD
+    assert_allowed "${tmpdir}" "allows git worktree list" worktree list
+    assert_allowed "${tmpdir}" "allows git worktree add" worktree add ../x
+    assert_allowed "${tmpdir}" "allows git worktree remove" worktree remove ../x
+    assert_allowed "${tmpdir}" "allows git worktree move" worktree move ../x ../y
+    assert_allowed "${tmpdir}" "allows git worktree prune" worktree prune
+    assert_allowed "${tmpdir}" "allows git worktree repair" worktree repair
+    assert_allowed "${tmpdir}" "allows git worktree lock" worktree lock ../x
+    assert_allowed "${tmpdir}" "allows git worktree unlock" worktree unlock ../x
+    assert_allowed "${tmpdir}" "allows git maintenance run" maintenance run --auto
+    assert_allowed "${tmpdir}" "allows git switch to branch" switch safe-target
+    assert_allowed "${tmpdir}" "allows git switch --quiet to branch" switch --quiet safe-target
+    assert_allowed "${tmpdir}" "allows git switch -c" switch -c safe-created
+    assert_allowed "${tmpdir}" "allows git switch --quiet -c" switch --quiet -c safe-created-quiet
+    assert_allowed "${tmpdir}" "allows git switch --create" switch --create safe-created-long
+    assert_allowed "${tmpdir}" "allows git switch - to previous branch" switch -
+    assert_allowed "${tmpdir}" "allows git reset with no args" reset
+    assert_allowed "${tmpdir}" "allows git reset --soft" reset --soft HEAD~1
+    assert_allowed "${tmpdir}" "allows git reset --mixed" reset --mixed HEAD~1
+    assert_allowed "${tmpdir}" "allows git reset to commit" reset HEAD~1
+    assert_allowed "${tmpdir}" "allows git reset path from HEAD" reset HEAD -- README.md
+    assert_allowed "${tmpdir}" "allows git reset path without commit" reset -- README.md
+    assert_allowed "${tmpdir}" "allows git worktree internal hard reset shape" reset --hard --no-recurse-submodules
+    assert_allowed "${tmpdir}" "allows git add inside repo" add .
+    assert_allowed "${tmpdir}" "allows git add with global -C" -C "${tmpdir}" add .
+    assert_commit_hardened "${tmpdir}" "allows normal git commit" commit -m 'safe commit'
+    assert_commit_hardened "${tmpdir}" "allows git global -c before commit" -c user.name=OpenAgent -c user.email=openagent@example.com commit -m 'safe commit'
+    assert_allowed "${tmpdir}" "allows git commit -F with global -C" -C "${tmpdir}" commit -F commit-message.txt
+
+    assert_denied_before_real_git "${tmpdir}" "denies reordered git diff-tree flags" diff-tree --name-only --no-commit-id -r HEAD
+    assert_denied_before_real_git "${tmpdir}" "denies git diff-tree missing HEAD" diff-tree --no-commit-id --name-only -r
+    assert_denied_before_real_git "${tmpdir}" "denies git diff-tree extra flags" diff-tree --no-commit-id --name-only -r --root HEAD
+    assert_denied_before_real_git "${tmpdir}" "denies git diff-tree alternate revisions" diff-tree --no-commit-id --name-only -r 'HEAD^'
+    assert_denied_before_real_git "${tmpdir}" "denies stdin-driven git diff-tree revisions" diff-tree --no-commit-id --name-only -r --stdin
+    assert_denied_before_real_git "${tmpdir}" "denies git diff-tree external diff execution" diff-tree --no-commit-id --name-only -r HEAD --ext-diff
+    assert_denied_before_real_git "${tmpdir}" "denies git diff-tree output file writes" diff-tree --no-commit-id --name-only -r HEAD --output=/tmp/devbox-diff-tree-output
+    assert_denied_before_real_git "${tmpdir}" "denies git diff-tree path arguments" diff-tree --no-commit-id --name-only -r HEAD -- README.md
+    assert_denied_before_real_git "${tmpdir}" "denies global options for git diff-tree" --no-optional-locks diff-tree --no-commit-id --name-only -r HEAD
+    assert_denied_before_real_git "${tmpdir}" "denies git-dir overrides for git diff-tree" --git-dir=.git diff-tree --no-commit-id --name-only -r HEAD
+    assert_denied_before_real_git "${tmpdir}" "denies config overrides for git diff-tree" -c user.name=OpenAgent diff-tree --no-commit-id --name-only -r HEAD
+    assert_denied_before_real_git "${tmpdir}" "denies global delimiter before git diff-tree" -- diff-tree --no-commit-id --name-only -r HEAD
+
+    assert_denied "${tmpdir}" "denies git push" push
+    assert_denied_stdout_visible "${tmpdir}" "denial is visible on stdout and stderr" push
+    assert_push_denied_as_fatal "${tmpdir}" "git push is reported as fatal blocked failure"
+    assert_denied_with_hint "${tmpdir}" "push denial has assistant hint" "never push from devbox" push
+    assert_denied "${tmpdir}" "denies git pull" pull
+    assert_denied "${tmpdir}" "denies git rebase" rebase main
+    assert_denied_with_hint "${tmpdir}" "rebase denial has assistant hint" "do not rewrite or integrate history inside devbox" rebase main
+    assert_denied "${tmpdir}" "denies git reset --hard" reset --hard
+    assert_denied_with_hint "${tmpdir}" "hard reset denial has assistant hint" "do not discard tracked work" reset --hard
+    assert_denied "${tmpdir}" "denies git reset --hard commit" reset --hard HEAD
+    assert_denied "${tmpdir}" "denies git reset --hard path" reset --hard -- README.md
+    assert_denied "${tmpdir}" "denies git reset internal hard shape with commit" reset --hard --no-recurse-submodules HEAD
+    assert_denied "${tmpdir}" "denies git reset --merge" reset --merge HEAD
+    assert_denied "${tmpdir}" "denies git reset --keep" reset --keep HEAD
+    assert_denied "${tmpdir}" "denies git reset --recurse-submodules" reset --recurse-submodules HEAD
+    assert_denied "${tmpdir}" "denies git reset --soft with extra arg" reset --soft HEAD~1 extra
+    assert_denied "${tmpdir}" "denies git clean" clean -fd
+    assert_denied_with_hint "${tmpdir}" "clean denial has assistant hint" "do not delete untracked files" clean -fd
+    assert_denied "${tmpdir}" "denies git commit --amend" commit --amend
+    assert_denied "${tmpdir}" "denies git switch --force" switch --force safe-target
+    assert_denied_with_hint "${tmpdir}" "unsafe switch denial has assistant hint" "use allowed branch-only switch forms" switch --force safe-target
+    assert_denied "${tmpdir}" "denies git switch --detach" switch --detach HEAD
+    assert_denied "${tmpdir}" "denies git switch extra arg" switch safe-target extra
+    assert_denied "${tmpdir}" "denies git switch without branch" switch
+    assert_denied "${tmpdir}" "denies git commit -F outside repo" commit -F /tmp/devbox-outside-message
+    assert_denied_with_hint "${tmpdir}" "path escape denial has assistant hint" "keep paths inside the repository" commit -F /tmp/devbox-outside-message
+    assert_denied "${tmpdir}" "denies git global unsafe -c" -c core.hooksPath=.githooks commit -m unsafe
+    assert_denied_with_hint "${tmpdir}" "unsafe config denial has assistant hint" "do not bypass devbox protections" -c core.hooksPath=.githooks commit -m unsafe
+    assert_denied "${tmpdir}" "denies git maintenance register" maintenance register
+    assert_denied "${tmpdir}" "denies unknown git worktree subcommand" worktree bogus
+    assert_denied "${tmpdir}" "denies unknown git subcommand" daemon
+    assert_denied_with_hint "${tmpdir}" "unknown command denial has assistant hint" "ask the user whether this command should be added with tests" daemon
+
+    if [[ "${FAILED}" -eq 0 ]]; then
+        printf '🎉 devbox-git focused tests passed\n'
+        return 0
+    fi
+
+    printf '⚠️  %d devbox-git focused test(s) failed\n' "${FAILED}" >&2
+    return 1
+}
+
+main "$@"

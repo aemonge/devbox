@@ -2876,7 +2876,8 @@ DEVBOX_PACKAGE
         "${script_dir}/test/devbox-git-policy-test" \
         "${script_dir}/test/devbox-parser-test" \
         "${script_dir}/test/devbox-opencode-integrity-test" \
-        "${script_dir}/test/devbox-opencode-preflight-test"; do
+        "${script_dir}/test/devbox-opencode-preflight-test" \
+        "${script_dir}/test/devbox-skills-symlink-test"; do
         printf '\n--- %s ---\n' "$(basename "${test_script}")"
         if [[ ! -x "${test_script}" ]]; then
             validation_fail "Test X.$(basename "${test_script}") FAIL: test is missing or not executable"

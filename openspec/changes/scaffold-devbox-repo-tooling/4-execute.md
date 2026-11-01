@@ -151,6 +151,41 @@ Host `just check` failed smoke test 26. Root causes, all real:
       routed: host copy from the old repo (human step), then wiring +
       host-green verification in this change
 - [x] Commit `fix: correct validate and doctor invocation contracts`
+      hash: f17ce73
+
+### Addendum 2 — adopt the legacy deep test suite (2026-11-01)
+
+Human copied the old repo's test/ into bin/test/ (the layout
+run_devbox_validation's X-loop expects). Wiring and findings:
+
+- [x] Secret scan of all adopted files — clean (only fixture payloads:
+      "key":"preserved", neighbor-secret escape-test)
+- [x] Removed dead siblings referencing never-extracted executables:
+      spi-parser-test, spi-static-test (../spi), updater-pi-test (../updater)
+- [x] Wired devbox-skills-symlink-test into the X-loop (14th entry; it tests
+      an existing feature and shipped orphaned)
+- [x] shellcheck remediation: file-level directives only — devbox-live-test
+      (SC2016: sandbox-bound -lc fixtures expand inside the box),
+      devbox-opencode-integrity-test (SC2034: salt read by sourced functions);
+      shfmt -i 4 applied to all 15 adopted shell scripts; bash -n OK
+- [x] Stale assertions aligned with already-validated policy (bbbcf44 yield
+      rule + nvim overlay gate): parser-test — explicit --add-rw over --add of
+      the same path now asserts the writable take-over and mount-order
+      shadowing (new assert_sequence_shadows helper); schema-destination
+      override likewise; static-test — lockfile-gate literal updated to the
+      nvim_config_mounted gate. No product code changes.
+- [x] install.sh copy mode fixed for the new bin/test/ subdir (find -type f
+      instead of bin/* glob — directory broke cp -p; caught by bats 17/18/20)
+- [x] In-sandbox suite results: parser 195✓, static 138✓, git-identity 3✓,
+      git-policy ✓, opencode-integrity 46✓, opencode-preflight 10✓,
+      skills-symlink 19✓, agent-context 12✓, cache 6✓ — all green nested;
+      live-test, live-extended-test, pty-test, pi-parity-test, pi-state-test
+      are namespace/real-binary dependent → host --validate is their arena
+- [x] just check fully green: lint over 21 shell scripts, shfmt diff-clean,
+      bats 32/32
+- [ ] Host-only act: `bin/devbox -- --validate` expected fully green on the
+      capable host (A.1–A.5 live sandbox tests + 14 X-suite scripts)
+- [ ] Commit `test: adopt legacy devbox validation suite`
       hash: pending
 
   gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/README.md · at 2026-11-01T10:38:39Z
@@ -282,3 +317,49 @@ Host `just check` failed smoke test 26. Root causes, all real:
   gate-attributed · tool: bash · paths: — · at 2026-11-01T11:02:33Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T11:03:02Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:33:40Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:34:54Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-live-test · at 2026-11-01T16:35:13Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-opencode-integrity-test · at 2026-11-01T16:35:13Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:35:13Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/devbox · at 2026-11-01T16:35:32Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/justfile · at 2026-11-01T16:35:32Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:35:59Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:36:11Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:36:44Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-parser-test · at 2026-11-01T16:38:44Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-static-test · at 2026-11-01T16:38:44Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:38:52Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:39:31Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-parser-test · at 2026-11-01T16:40:45Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:40:54Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:41:22Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-parser-test · at 2026-11-01T16:42:28Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:42:35Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:43:09Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/install.sh · at 2026-11-01T16:44:53Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:45:01Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T16:48:33Z

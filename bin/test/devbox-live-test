@@ -1,0 +1,1127 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # Sandbox-bound -lc fixtures intentionally expand inside the box.
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+export DEVBOX_TEST_TARGET="${DEVBOX}"
+PI_BIN=pi
+LIVE_VALIDATION_ROOT=""
+LIVE_VALIDATION_SSH_AGENT_PID=""
+cleanup_live_validation() {
+    if [[ -n "${LIVE_VALIDATION_SSH_AGENT_PID}" ]]; then
+        kill "${LIVE_VALIDATION_SSH_AGENT_PID}" 2>/dev/null || true
+        wait "${LIVE_VALIDATION_SSH_AGENT_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${LIVE_VALIDATION_ROOT}" && -d "${LIVE_VALIDATION_ROOT}" ]]; then
+        rm -rf -- "${LIVE_VALIDATION_ROOT}"
+    fi
+}
+trap cleanup_live_validation EXIT
+
+validation_pass() { printf '✅ %s\n' "$1"; }
+validation_fail() { printf '❌ %s\n' "$1"; }
+validation_warn() { printf '⚠️  %s\n' "$1"; }
+
+check_bwrap_namespace_support() {
+    bwrap --ro-bind / / --proc /proc --dev /dev --unshare-pid --die-with-parent -- /bin/true >/dev/null 2>&1
+}
+
+run_validation() {
+    local script_path="${SCRIPT_DIR}/devbox-test-adapter"
+    local validation_root
+    local test_home
+    local test_project
+    local direct_openspec_project
+    local symlink_source_project
+    local symlink_logical_project
+    local neighbor_dir
+    local shared_ro_dir
+    local shared_rw_dir
+    local terminal_xdg_config_home
+    local terminal_zdotdir
+    local terminal_runtime_dir
+    local terminal_runtime_marker
+    local terminal_nvim_socket
+    local terminal_nvim_listen_socket
+    local terminal_nvim_editor
+    local terminal_tmux_socket
+    local ssh_agent_socket
+    local ssh_test_key
+    local target_file_path
+    local sibling_file_path
+    local plugin_home
+    local plugin_agent_dir
+    local plugin_package_dir
+    local pi_root_config_source_dir
+    local linked_resource_home
+    local linked_pi_agents
+    local linked_pi_taskflows
+    local custom_xdg_state_home
+    local validation_pi_bin
+    local failed_tests=0
+    local live_bwrap=0
+    local output
+    local neighbor_dir_q
+    local shared_ro_dir_q
+    local shared_rw_dir_q
+    local terminal_runtime_marker_q
+    local target_file_path_q
+    local sibling_file_path_q
+    local project_skill_file_q
+    local editor_runtime_probe
+
+    validation_root="$(mktemp -d "${TMPDIR:-/tmp}/devbox-live-validation.XXXXXX")"
+    LIVE_VALIDATION_ROOT="${validation_root}"
+    test_home="${validation_root}/home"
+    test_project="${validation_root}/project"
+    direct_openspec_project="${validation_root}/direct-openspec"
+    symlink_source_project="${validation_root}/symlink-source/.config"
+    symlink_logical_project="${test_home}/.config/linked-nvim"
+    neighbor_dir="${validation_root}/neighbor"
+    shared_ro_dir="${validation_root}/shared-ro"
+    shared_rw_dir="${validation_root}/shared-rw"
+    terminal_xdg_config_home="${test_home}/xdg-config"
+    terminal_zdotdir="${test_home}/.config/zsh"
+    terminal_runtime_dir="${validation_root}/runtime"
+    terminal_runtime_marker="${terminal_runtime_dir}/marker.txt"
+    terminal_nvim_socket="${terminal_runtime_dir}/nvim.sock"
+    terminal_nvim_listen_socket="${terminal_runtime_dir}/nvim-listen.sock"
+    terminal_nvim_editor="${test_home}/.config/nvim/scripts/opencode-editor"
+    terminal_tmux_socket="${terminal_runtime_dir}/tmux/default"
+    ssh_agent_socket="${terminal_runtime_dir}/ssh-agent.sock"
+    ssh_test_key="${test_home}/.ssh/ssh-keys/personal/devbox-test"
+    target_file_path="${test_project}/src/lib/target.txt"
+    sibling_file_path="${test_project}/src/lib/sibling.txt"
+    plugin_home="${validation_root}/plugin-home"
+    plugin_agent_dir="${plugin_home}/.pi/agent"
+    plugin_package_dir="${plugin_agent_dir}/packages/devbox-validation-package"
+    pi_root_config_source_dir="${validation_root}/pi-root-config-source"
+    linked_resource_home="${validation_root}/linked-resource-home"
+    linked_pi_agents="${validation_root}/linked-pi-agents"
+    linked_pi_taskflows="${validation_root}/linked-pi-taskflows"
+    custom_xdg_state_home="${validation_root}/custom-xdg-state"
+    validation_pi_bin="$(command -v "${PI_BIN}" 2>/dev/null || true)"
+    printf -v neighbor_dir_q '%q' "${neighbor_dir}"
+    printf -v shared_ro_dir_q '%q' "${shared_ro_dir}"
+    printf -v shared_rw_dir_q '%q' "${shared_rw_dir}"
+    printf -v terminal_runtime_marker_q '%q' "${terminal_runtime_marker}"
+    printf -v target_file_path_q '%q' "${target_file_path}"
+    printf -v sibling_file_path_q '%q' "${sibling_file_path}"
+    printf -v project_skill_file_q '%q' "${test_project}/.agents/skills/example/SKILL.md"
+
+    mkdir -p -- \
+        "${test_home}/.pi/agent" \
+        "${test_home}/.pi/agent/tasks" \
+        "${test_home}/.pi/agent/status" \
+        "${test_home}/.pi/agent/todos" \
+        "${test_home}/.pi/agent/plans" \
+        "${test_home}/.pi/agent/jobs" \
+        "${test_home}/.pi/agent/runs" \
+        "${test_home}/.pi/agent/ui" \
+        "${test_home}/.pi/agent/statusline" \
+        "${test_home}/.pi/agent/agents" \
+        "${test_home}/.pi/agent/scripts" \
+        "${test_home}/.pi/agent/taskflows" \
+        "${test_home}/.pi/providers" \
+        "${test_home}/.pi/models" \
+        "${test_home}/.config/pi" \
+        "${test_home}/.local/share/pi" \
+        "${test_home}/.local/share/openspec/schemas/ramona-idea" \
+        "${test_home}/.local/share/openspec/schemas/ramona-plan" \
+        "${test_home}/.local/share/private-data" \
+        "${test_home}/.local/state/pi" \
+        "${test_home}/.local/state/private-data" \
+        "${custom_xdg_state_home}" \
+        "${test_home}/.cache/pi" \
+        "${test_home}/.agents/skills/example" \
+        "${test_home}/.local/bin" \
+        "${test_home}/.ssh/ssh-keys/personal" \
+        "${test_home}/.config/nvim/scripts" \
+        "${terminal_xdg_config_home}" \
+        "${terminal_zdotdir}" \
+        "${test_home}/.pi" \
+        "${test_project}/.git" \
+        "${test_project}/.github" \
+        "${test_project}/.turbo" \
+        "${test_project}/.cargo" \
+        "${test_project}/.agents/skills/example" \
+        "${test_project}/.pi" \
+        "${test_project}/node_modules" \
+        "${test_project}/src/lib" \
+        "${direct_openspec_project}/openspec/changes/direct-validation" \
+        "${direct_openspec_project}/openspec/specs" \
+        "${direct_openspec_project}/.pi/prompts" \
+        "${plugin_agent_dir}/extensions" \
+        "${plugin_package_dir}" \
+        "${pi_root_config_source_dir}" \
+        "${linked_resource_home}/.pi/agent" \
+        "${linked_resource_home}/.local/share/openspec/schemas/ramona-idea" \
+        "${linked_resource_home}/.local/share/openspec/schemas/ramona-plan" \
+        "${linked_resource_home}/.local/share/private-data" \
+        "${linked_pi_agents}" "${linked_pi_taskflows}" \
+        "${validation_root}/nested-parent/nvim" \
+        "${validation_root}/nested-parent/openspec/changes/nested-validation" \
+        "${symlink_source_project}/nvim" \
+        "${symlink_source_project}/openspec/changes/symlink-validation" \
+        "$(dirname -- "${terminal_tmux_socket}")" \
+        "${neighbor_dir}"
+    ln -s "${symlink_source_project}/nvim" "${symlink_logical_project}"
+    ln -s "${linked_pi_agents}" "${linked_resource_home}/.pi/agent/agents"
+    ln -s "${linked_pi_taskflows}" "${linked_resource_home}/.pi/agent/taskflows"
+    printf 'original-pi-config\n' >"${test_home}/.pi/config"
+    printf '{"theme":"original"}\n' >"${test_home}/.pi/agent/settings.json"
+    printf '{"trusted":false}\n' >"${test_home}/.pi/agent/trust.json"
+    printf '{"devboxSentinel":"fancy-footer"}\n' >"${pi_root_config_source_dir}/fancy-footer.json"
+    printf '{"devboxSentinel":"galactica-status"}\n' >"${pi_root_config_source_dir}/galactica-status.json"
+    ln -s "${pi_root_config_source_dir}/fancy-footer.json" "${test_home}/.pi/agent/fancy-footer.json"
+    ln -s "${pi_root_config_source_dir}/galactica-status.json" "${test_home}/.pi/agent/galactica-status.json"
+    printf 'provider-catalog\n' >"${test_home}/.pi/providers/catalog.txt"
+    printf 'model-catalog\n' >"${test_home}/.pi/models/catalog.txt"
+    printf 'pi-xdg-config\n' >"${test_home}/.config/pi/config.toml"
+    printf 'pi-xdg-data\n' >"${test_home}/.local/share/pi/resource.txt"
+    printf 'agent-resource\n' >"${test_home}/.pi/agent/agents/ramona-step-engineer.md"
+    printf '#!/usr/bin/env bash\n' >"${test_home}/.pi/agent/scripts/devbox-helper"
+    printf 'taskflow-resource\n' >"${test_home}/.pi/agent/taskflows/ramona-happy-path.json"
+    printf 'idea-schema\n' >"${test_home}/.local/share/openspec/schemas/ramona-idea/schema.yaml"
+    printf 'plan-schema\n' >"${test_home}/.local/share/openspec/schemas/ramona-plan/schema.yaml"
+    printf 'private-data\n' >"${test_home}/.local/share/private-data/hidden.txt"
+    printf 'private-state\n' >"${test_home}/.local/state/private-data/hidden.txt"
+    printf 'linked-agent-resource\n' >"${linked_pi_agents}/ramona-step-engineer.md"
+    printf 'linked-taskflow-resource\n' >"${linked_pi_taskflows}/ramona-happy-path.json"
+    printf 'linked-idea-schema\n' >"${linked_resource_home}/.local/share/openspec/schemas/ramona-idea/schema.yaml"
+    printf 'linked-plan-schema\n' >"${linked_resource_home}/.local/share/openspec/schemas/ramona-plan/schema.yaml"
+    printf 'linked-private-data\n' >"${linked_resource_home}/.local/share/private-data/hidden.txt"
+    printf 'skill-resource\n' >"${test_home}/.agents/skills/example/SKILL.md"
+    printf 'project-skill-resource\n' >"${test_project}/.agents/skills/example/SKILL.md"
+    cat >"${test_home}/.ssh/config" <<'SSH_CONFIG'
+Host devbox-ssh-fixture
+    HostName localhost
+    Port 2355
+    IdentityFile ~/.ssh/ssh-keys/personal/devbox-test
+SSH_CONFIG
+    printf 'fixture-host-key\n' >"${test_home}/.ssh/known_hosts"
+    printf 'private-key-must-stay-hidden\n' >"${ssh_test_key}"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixturePublicKeyOnly devbox-test\n' >"${ssh_test_key}.pub"
+    chmod 0700 "${test_home}/.ssh" "${test_home}/.ssh/ssh-keys" "${test_home}/.ssh/ssh-keys/personal"
+    chmod 0600 "${test_home}/.ssh/config" "${test_home}/.ssh/known_hosts" "${ssh_test_key}"
+    chmod 0644 "${ssh_test_key}.pub"
+    printf "format = \"\$directory\"\n" >"${test_home}/.config/starship.toml"
+    printf "format = \"\$character\"\n" >"${terminal_xdg_config_home}/starship.toml"
+    printf 'validation-zshenv\n' >"${test_home}/.zshenv"
+    printf 'validation-zshrc\n' >"${test_home}/.zshrc"
+    printf 'validation-zdotdir-zshrc\n' >"${terminal_zdotdir}/.zshrc"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${terminal_nvim_editor}"
+    chmod +x "${terminal_nvim_editor}"
+    chmod 0700 -- "${terminal_runtime_dir}"
+    printf 'runtime-marker\n' >"${terminal_runtime_marker}"
+    printf 'neighbor-secret\n' >"${neighbor_dir}/secret.txt"
+    printf 'DEVBOX_VALIDATION=1\n' >"${test_project}/.env"
+    printf 'ignored\n' >"${test_project}/.gitignore"
+    printf 'lock\n' >"${test_project}/package-lock.json"
+    printf 'lock\n' >"${test_project}/poetry.lock"
+    printf 'lock\n' >"${test_project}/Cargo.lock"
+    printf 'lock\n' >"${test_project}/pnpm-lock.yaml"
+    printf 'lock\n' >"${test_project}/yarn.lock"
+    printf 'project-pi-original\n' >"${test_project}/.pi/original.txt"
+    printf 'schema: spec-driven\n' >"${direct_openspec_project}/openspec/config.yaml"
+    printf 'schema: spec-driven\ncreated: 2026-08-04\n' >"${direct_openspec_project}/openspec/changes/direct-validation/.openspec.yaml"
+    printf 'direct-pi-prompt\n' >"${direct_openspec_project}/.pi/prompts/opsx-propose.md"
+    printf '%s\n' '{"packages":["./packages/devbox-validation-package"]}' >"${plugin_agent_dir}/settings.json"
+    printf '%s\n' '{}' >"${plugin_agent_dir}/trust.json"
+    cat >"${plugin_agent_dir}/extensions/devbox-auto-validation.ts" <<'DEVBOX_AUTO_EXTENSION'
+export default function (pi: any) {
+  pi.registerFlag("devbox-auto-extension-loaded", {
+    description: "DEVBOX auto-discovered extension loaded",
+    type: "boolean",
+    default: false,
+  });
+}
+DEVBOX_AUTO_EXTENSION
+    printf '%s\n' '{"name":"devbox-validation-package","pi":{"extensions":["./index.ts"]}}' >"${plugin_package_dir}/package.json"
+    cat >"${plugin_package_dir}/index.ts" <<'DEVBOX_PACKAGE_EXTENSION'
+export default function (pi: any) {
+  pi.registerFlag("devbox-package-extension-loaded", {
+    description: "DEVBOX settings package extension loaded",
+    type: "boolean",
+    default: false,
+  });
+}
+DEVBOX_PACKAGE_EXTENSION
+    printf 'alpha\n' >"${target_file_path}"
+    printf 'beta\n' >"${sibling_file_path}"
+    printf 'nested-openspec\n' >"${validation_root}/nested-parent/openspec/changes/nested-validation/tasks.md"
+    printf 'symlink-openspec\n' >"${symlink_source_project}/openspec/changes/symlink-validation/tasks.md"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf host-tool-ok' >"${test_home}/.local/bin/devbox-host-tool"
+    chmod +x "${test_home}/.local/bin/devbox-host-tool"
+    mkdir -p -- "${shared_ro_dir}" "${shared_rw_dir}"
+    printf 'shared-ro\n' >"${shared_ro_dir}/note.txt"
+    printf 'shared-rw\n' >"${shared_rw_dir}/note.txt"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${terminal_nvim_socket}" "${terminal_nvim_listen_socket}" "${terminal_tmux_socket}" <<'PY'
+import os
+import socket
+import sys
+
+for path in sys.argv[1:]:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(path)
+    sock.close()
+PY
+    fi
+
+    printf 'devbox comprehensive live validation\n'
+
+    if command -v bwrap >/dev/null 2>&1; then
+        validation_pass "Test 0.1 PASS: bwrap found at $(command -v bwrap)"
+        if check_bwrap_namespace_support; then
+            validation_pass 'Test 0.2 PASS: bwrap namespace probe succeeded'
+            live_bwrap=1
+        else
+            validation_fail 'Test 0.2 FAIL: bwrap namespace probe failed'
+            failed_tests=$((failed_tests + 1))
+        fi
+    else
+        validation_fail 'Test 0.1 FAIL: bwrap not found'
+        failed_tests=$((failed_tests + 1))
+    fi
+
+    if [[ -x /bin/true ]]; then
+        validation_pass 'Test 0.3 PASS: safe fake Pi binary is available at /bin/true'
+    else
+        validation_fail 'Test 0.3 FAIL: /bin/true is not executable'
+        failed_tests=$((failed_tests + 1))
+        live_bwrap=0
+    fi
+
+    run_validation_devbox_with_home() {
+        local sandbox_home="$1"
+        local sandbox_agent_dir="$2"
+        local sandbox_xdg_config_home="${DEVBOX_VALIDATION_XDG_CONFIG_HOME:-${sandbox_home}/.config}"
+        local sandbox_xdg_data_home="${DEVBOX_VALIDATION_XDG_DATA_HOME:-${sandbox_home}/.local/share}"
+        local sandbox_xdg_state_home="${DEVBOX_VALIDATION_XDG_STATE_HOME:-${sandbox_home}/.local/state}"
+        local sandbox_xdg_cache_home="${DEVBOX_VALIDATION_XDG_CACHE_HOME:-${sandbox_home}/.cache}"
+        shift 2
+
+        env \
+            HOME="${sandbox_home}" \
+            PATH="${PATH}" \
+            XDG_CONFIG_HOME="${sandbox_xdg_config_home}" \
+            XDG_DATA_HOME="${sandbox_xdg_data_home}" \
+            XDG_STATE_HOME="${sandbox_xdg_state_home}" \
+            XDG_CACHE_HOME="${sandbox_xdg_cache_home}" \
+            USER="${USER:-aemonge}" \
+            LOGNAME="${LOGNAME:-${USER:-aemonge}}" \
+            TERM="${TERM:-xterm-256color}" \
+            LANG="${LANG:-C.UTF-8}" \
+            RUSTUP_HOME="${sandbox_home}/.local/share/rustup" \
+            CARGO_HOME="${sandbox_home}/.local/share/cargo" \
+            GOPATH="${sandbox_home}/.local/share/go" \
+            GOBIN= \
+            SSH_AUTH_SOCK="${DEVBOX_VALIDATION_SSH_AUTH_SOCK:-}" \
+            PI_BIN="${DEVBOX_VALIDATION_PI_BIN:-/bin/true}" \
+            PI_CODING_AGENT_DIR="${sandbox_agent_dir}" \
+            DEVBOX_FORCE_PROBE=1 \
+            "${script_path}" "$@"
+    }
+
+    run_validation_devbox() {
+        run_validation_devbox_with_home "${test_home}" "${test_home}/.pi/agent" "$@"
+    }
+
+    run_devbox_terminal_fixture() {
+        DEVBOX_VALIDATION_XDG_CONFIG_HOME="${terminal_xdg_config_home}" \
+            XDG_RUNTIME_DIR="${terminal_runtime_dir}" \
+            ZDOTDIR="${terminal_zdotdir}" \
+            NVIM="${terminal_nvim_socket}" \
+            NVIM_LISTEN_ADDRESS="${terminal_nvim_listen_socket}" \
+            TMUX="${terminal_tmux_socket},777,0" \
+            TMUX_PANE="%7" \
+            run_validation_devbox "$@"
+    }
+
+    if [[ "${live_bwrap}" -eq 1 ]]; then
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf "%s" "$HOME"' 2>&1 || true)"
+        if [[ "${output}" == "${test_home}" ]]; then
+            validation_pass 'Test A.1 PASS: HOME mirrors host home path on tmpfs'
+        else
+            validation_fail "Test A.1 FAIL: HOME is ${output} (expected ${test_home})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf DEVBOX_TEST > "$HOME/.bashrc"' 2>&1 || true)"
+        if [[ ! -e "${test_home}/.bashrc" ]]; then
+            validation_pass 'Test A.2 PASS: ~/.bashrc writes do not leak to host'
+        else
+            validation_fail "Test A.2 FAIL: ~/.bashrc write leaked to host (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'touch /usr/bin/devbox-validation-system-write 2>&1' 2>&1 || true)"
+        if [[ "${output}" =~ Read-only|Permission\ denied|cannot\ touch|Operation\ not\ permitted ]]; then
+            validation_pass 'Test A.3 PASS: system files are read-only'
+        else
+            validation_fail "Test A.3 FAIL: system file write was not blocked (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        if [[ -n "${validation_pi_bin}" && -x "${validation_pi_bin}" ]]; then
+            output="$(env -u PI_CODING_AGENT_DIR -u SSH_AUTH_SOCK \
+                HOME="${plugin_home}" PATH="${PATH}" \
+                USER="${USER:-aemonge}" LOGNAME="${LOGNAME:-${USER:-aemonge}}" \
+                TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+                PI_BIN="${validation_pi_bin}" DEVBOX_FORCE_PROBE=1 \
+                "${script_path}" --help -- "${test_project}" -q --backend bwrap --no-host-tools --no-ssh-agent 2>&1 || true)"
+            if [[ "${output}" == *--devbox-auto-extension-loaded* && "${output}" == *--devbox-package-extension-loaded* ]]; then
+                validation_pass 'Test A.4 PASS: real Pi loads global extensions and settings packages without a host PI_CODING_AGENT_DIR override'
+            else
+                validation_fail "Test A.4 FAIL: real Pi did not load mounted global extensions/settings packages (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+        else
+            validation_warn 'Test A.4 SKIP: real Pi binary unavailable for extension loading probe'
+        fi
+
+        if output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf devbox-rw-ok > validation-write.txt && cat validation-write.txt' 2>&1)" &&
+            [[ "${output}" == "devbox-rw-ok" ]] && [[ -f "${test_project}/validation-write.txt" ]] &&
+            [[ "$(<"${test_project}/validation-write.txt")" == "devbox-rw-ok" ]]; then
+            validation_pass 'Test B.1 PASS: default rw workspace writes persist to target'
+        else
+            validation_fail "Test B.1 FAIL: default rw workspace write failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --ro -x /bin/bash --noprofile --norc -lc 'printf nope > ro-blocked.txt' 2>&1 || true)"
+        if [[ ! -e "${test_project}/ro-blocked.txt" ]] && [[ "${output}" =~ Read-only|Permission\ denied|cannot\ create|Operation\ not\ permitted ]]; then
+            validation_pass 'Test B.2 PASS: --ro blocks workspace writes'
+        else
+            validation_fail "Test B.2 FAIL: --ro workspace write was not blocked (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        if output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf nm-ok > node_modules/devbox-validation && cat node_modules/devbox-validation' 2>&1)" &&
+            [[ "${output}" == "nm-ok" ]] && [[ -f "${test_project}/node_modules/devbox-validation" ]]; then
+            validation_pass 'Test B.3 PASS: node_modules is writable when workspace is rw'
+        else
+            validation_fail "Test B.3 FAIL: node_modules was not writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -e .env && cat .env' 2>&1 || true)"
+        if [[ "${output}" == 'DEVBOX_VALIDATION=1' ]]; then
+            validation_pass 'Test B.4 PASS: project .env is visible'
+        else
+            validation_fail "Test B.4 FAIL: project .env was not visible (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf RAW_OK' 2>&1 || true)"
+        if [[ "${output}" == 'RAW_OK' ]]; then
+            validation_pass 'Test B.5 PASS: raw commands execute inside sandbox'
+        else
+            validation_fail "Test B.5 FAIL: raw command output was ${output}"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test "$(readlink /dev/fd)" = /proc/self/fd && test "$(readlink /dev/stdin)" = /proc/self/fd/0 && test "$(readlink /dev/stdout)" = /proc/self/fd/1 && test "$(readlink /dev/stderr)" = /proc/self/fd/2 && cmp -s <(printf x) <(printf x) && for node in null zero random urandom tty; do test -c "/dev/$node" || exit 1; done && test ! -e /dev/full && printf RESTRICTED_FD_OK' 2>&1 || true)"
+        if [[ "${output}" == 'RESTRICTED_FD_OK' ]]; then
+            validation_pass 'Test B.5a PASS: restricted mode keeps selected devices and bounded file-descriptor compatibility'
+        else
+            validation_fail "Test B.5a FAIL: restricted file-descriptor compatibility failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --locked -x /bin/bash --noprofile --norc -lc 'test "$(readlink /dev/fd)" = /proc/self/fd && test "$(readlink /dev/stdin)" = /proc/self/fd/0 && test "$(readlink /dev/stdout)" = /proc/self/fd/1 && test "$(readlink /dev/stderr)" = /proc/self/fd/2 && cmp -s <(printf x) <(printf x) && test ! -e /dev/full && printf LOCKED_FD_OK' 2>&1 || true)"
+        if [[ "${output}" == 'LOCKED_FD_OK' ]]; then
+            validation_pass 'Test B.5b PASS: locked mode keeps bounded file-descriptor compatibility'
+        else
+            validation_fail "Test B.5b FAIL: locked file-descriptor compatibility failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --full-dev -x /bin/bash --noprofile --norc -lc 'test -c /dev/full && cmp -s <(printf x) <(printf x) && printf FULL_DEV_OK' 2>&1 || true)"
+        if [[ "${output}" == 'FULL_DEV_OK' ]]; then
+            validation_pass 'Test B.5c PASS: full-dev keeps its existing device-tree behavior'
+        else
+            validation_fail "Test B.5c FAIL: full-dev behavior changed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # Variables expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${validation_root}/nested-parent/nvim" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'task_path="$(dirname "$PWD")/openspec/changes/nested-validation/tasks.md"; cat "$task_path" >/dev/null || exit 1; if printf bad > "$task_path" 2>/dev/null; then printf OPENSPEC_WRITE_ALLOWED; else printf OPENSPEC_RO; fi' 2>&1 || true)"
+        if [[ "${output}" == *OPENSPEC_RO* ]] && [[ "${output}" != *OPENSPEC_WRITE_ALLOWED* ]] &&
+            [[ "$(<"${validation_root}/nested-parent/openspec/changes/nested-validation/tasks.md")" == 'nested-openspec' ]]; then
+            validation_pass 'Test B.7 PASS: nested target sees nearest project OpenSpec read-only'
+        else
+            validation_fail "Test B.7 FAIL: nested target OpenSpec visibility/policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # Variables expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${symlink_logical_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'task_path="$HOME/.config/openspec/changes/symlink-validation/tasks.md"; cat "$task_path" >/dev/null || exit 1; if printf bad > "$task_path" 2>/dev/null; then printf SYMLINK_OPENSPEC_WRITE_ALLOWED; else printf SYMLINK_OPENSPEC_RO; fi' 2>&1 || true)"
+        if [[ "${output}" == *SYMLINK_OPENSPEC_RO* ]] && [[ "${output}" != *SYMLINK_OPENSPEC_WRITE_ALLOWED* ]] &&
+            [[ "$(<"${symlink_source_project}/openspec/changes/symlink-validation/tasks.md")" == 'symlink-openspec' ]]; then
+            validation_pass 'Test B.8 PASS: symlinked config target sees resolved project OpenSpec read-only at logical path'
+        else
+            validation_fail "Test B.8 FAIL: symlinked config target OpenSpec visibility/policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        if command -v openspec >/dev/null 2>&1; then
+            output="$(run_validation_devbox -- "${direct_openspec_project}" -q --backend bwrap -x node -e 'const {execFileSync}=require("child_process"); const out=execFileSync("openspec",["list","--json"],{cwd:process.cwd(),encoding:"utf8"}); const parsed=JSON.parse(out); if(parsed.changes?.[0]?.name!=="direct-validation") throw new Error(out); if(out.includes("Note: OpenSpec")) throw new Error("telemetry note in stdout"); process.stdout.write("DIRECT_OPENSPEC_JSON_OK")' 2>&1 || true)"
+            if [[ "${output}" == 'DIRECT_OPENSPEC_JSON_OK' ]]; then
+                validation_pass 'Test B.9 PASS: direct OpenSpec target emits clean JSON for footer parsing'
+            else
+                validation_fail "Test B.9 FAIL: direct OpenSpec JSON parsing failed (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+        else
+            printf 'ℹ️  Test B.9 SKIP: openspec unavailable for direct OpenSpec JSON probe\n'
+        fi
+
+        # shellcheck disable=SC2016 # Runtime variables must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -d "$TMPDIR" && test -w "$TMPDIR" && test "$(stat -c %a "$TMPDIR")" = 700 || exit 1; if test -n "${NVIM:-}"; then test "$TMPDIR" = "$XDG_RUNTIME_DIR" && case "$TMPDIR" in */devbox/run.*.*.*) ;; *) printf "bad-shared-path:%s" "$TMPDIR"; exit 1 ;; esac; else case "$TMPDIR" in /tmp/devbox-*) ;; *) printf "bad-private-path:%s" "$TMPDIR"; exit 1 ;; esac; fi; printf TMPDIR_OK' 2>&1 || true)"
+        if [[ "${output}" == 'TMPDIR_OK' ]]; then
+            validation_pass 'Test B.6 PASS: TMPDIR is private unless an exact active Neovim handoff needs host visibility'
+        else
+            validation_fail "Test B.6 FAIL: private TMPDIR check failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'command -v devbox-host-tool >/dev/null && devbox-host-tool' 2>&1 || true)"
+        if [[ "${output}" == 'host-tool-ok' ]]; then
+            validation_pass 'Test D.1 PASS: ~/.local/bin host tools are exposed on PATH'
+        else
+            validation_fail "Test D.1 FAIL: ~/.local/bin host tool was not exposed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME expands inside the sandbox.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'for d in "$HOME/.cache/uv" "$HOME/.local/share/pnpm" "$HOME/.local/share/cargo" "$HOME/.local/share/go" "$HOME/.bun"; do if ! test -w "$d"; then printf "NOT_WRITABLE:%s" "$d"; exit 1; fi; done; printf HOST_TOOL_STATE_OK' 2>&1 || true)"
+        if [[ "${output}" == 'HOST_TOOL_STATE_OK' ]]; then
+            validation_pass 'Test D.1b PASS: devbox-parity host tool state is writable'
+        else
+            validation_fail "Test D.1b FAIL: host tool state is unavailable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'grep -q "^nameserver " /etc/resolv.conf && printf RESOLVER_OK' 2>&1 || true)"
+        if [[ "${output}" == 'RESOLVER_OK' ]]; then
+            validation_pass 'Test D.2 PASS: DNS resolver config is available'
+        else
+            validation_warn "Test D.2 WARN: DNS resolver config unavailable or unusual (${output})"
+        fi
+
+        if command -v timeout >/dev/null 2>&1; then
+            output="$(timeout 10s env \
+                HOME="${test_home}" \
+                PATH="${PATH}" \
+                USER="${USER:-aemonge}" \
+                LOGNAME="${LOGNAME:-${USER:-aemonge}}" \
+                TERM="${TERM:-xterm-256color}" \
+                LANG="${LANG:-C.UTF-8}" \
+                PI_BIN=/bin/true \
+                PI_CODING_AGENT_DIR="${test_home}/.pi/agent" \
+                DEVBOX_FORCE_PROBE=1 \
+                "${script_path}" -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'getent hosts api.openai.com >/dev/null && printf DNS_OK' 2>&1 || true)"
+            if [[ "${output}" == 'DNS_OK' ]]; then
+                validation_pass 'Test D.3 PASS: DNS lookup works inside sandbox'
+            else
+                printf 'ℹ️  Test D.3 SKIP: DNS lookup not guaranteed in this environment (%s)\n' "${output}"
+            fi
+        else
+            printf 'ℹ️  Test D.3 SKIP: timeout unavailable for bounded DNS probe\n'
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf git-ok > .git/devbox-default && cat .git/devbox-default' 2>&1 || true)"
+        if [[ "${output}" == 'git-ok' && "$(<"${test_project}/.git/devbox-default")" == 'git-ok' ]]; then
+            validation_pass 'Test C.1 PASS: .git is writable inside the selected target by default'
+        else
+            validation_fail "Test C.1 FAIL: default .git write failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        if output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-git -x /bin/bash --noprofile --norc -lc 'printf devbox-git-ok > .git/devbox-allowed && cat .git/devbox-allowed' 2>&1)" &&
+            [[ "${output}" == "devbox-git-ok" ]] && [[ -f "${test_project}/.git/devbox-allowed" ]]; then
+            validation_pass 'Test C.2 PASS: --allow-git remains compatible with default Git writes'
+        else
+            validation_fail "Test C.2 FAIL: --allow-git compatibility failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf agents-ok > .agents/devbox-default && cat .agents/devbox-default' 2>&1 || true)"
+        if [[ "${output}" == 'agents-ok' && "$(<"${test_project}/.agents/devbox-default")" == 'agents-ok' ]]; then
+            validation_pass 'Test C.3 PASS: project .agents is writable inside the selected target'
+        else
+            validation_fail "Test C.3 FAIL: project .agents write failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $path expands inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'for path in .github/devbox-validation .turbo/devbox-validation .cargo/devbox-validation .gitignore package-lock.json poetry.lock Cargo.lock pnpm-lock.yaml yarn.lock; do if { printf bad > "$path"; } 2>/dev/null; then printf "WRITE_ALLOWED:%s" "$path"; exit 1; fi; done; printf INFRA_RO' 2>&1 || true)"
+        if [[ "${output}" == *INFRA_RO* && "${output}" != *WRITE_ALLOWED:* ]] && [[ ! -e "${test_project}/.github/devbox-validation" ]] &&
+            [[ "$(<"${test_project}/Cargo.lock")" == 'lock' ]]; then
+            validation_pass 'Test C.4 PASS: devbox-compatible critical infrastructure is read-only by default'
+        else
+            validation_fail "Test C.4 FAIL: critical infrastructure protection failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-infra -x /bin/bash --noprofile --norc -lc 'printf infra-ok > .github/devbox-allowed && printf lock-ok > Cargo.lock && printf INFRA_RW' 2>&1 || true)"
+        if [[ "${output}" == 'INFRA_RW' ]] && [[ "$(<"${test_project}/.github/devbox-allowed")" == 'infra-ok' ]] &&
+            [[ "$(<"${test_project}/Cargo.lock")" == 'lock-ok' ]]; then
+            validation_pass 'Test C.5 PASS: --allow-infra restores target infrastructure writes'
+        else
+            validation_fail "Test C.5 FAIL: --allow-infra did not restore writes (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc "mkdir -p ${neighbor_dir_q} && printf bad > ${neighbor_dir_q}/escape.txt && printf attempted" 2>&1 || true)"
+        if [[ ! -e "${neighbor_dir}/escape.txt" ]] && [[ -f "${neighbor_dir}/secret.txt" ]] &&
+            [[ "$(<"${neighbor_dir}/secret.txt")" == "neighbor-secret" ]]; then
+            validation_pass 'Test D.1 PASS: parent/neighbor path escape does not mutate host paths'
+        else
+            validation_fail "Test D.1 FAIL: parent/neighbor host path was mutated (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf bad > "$HOME/.pi/config"' 2>&1 || true)"
+        if [[ -f "${test_home}/.pi/config" ]] && [[ "$(<"${test_home}/.pi/config")" == "original-pi-config" ]] &&
+            [[ "${output}" =~ Read-only|Permission\ denied|cannot\ create|Operation\ not\ permitted ]]; then
+            validation_pass 'Test E.1 PASS: Pi config is blocked by default'
+        else
+            validation_fail "Test E.1 FAIL: default Pi config protection did not block writes (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -r "$HOME/.pi/config" && cat "$HOME/.pi/config"' 2>&1 || true)"
+        if [[ "${output}" == 'original-pi-config' ]]; then
+            validation_pass 'Test E.2 PASS: Pi config is readable when bound read-only'
+        else
+            validation_fail "Test E.2 FAIL: Pi config read failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_home}/.pi" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf selected-pi-ok > selected-target-write && cat selected-target-write' 2>&1 || true)"
+        if [[ "${output}" == 'selected-pi-ok' && "$(<"${test_home}/.pi/selected-target-write")" == 'selected-pi-ok' ]]; then
+            validation_pass 'Test E.2b PASS: selecting ~/.pi makes that target writable'
+        else
+            validation_fail "Test E.2b FAIL: selected ~/.pi target was not writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $PI_CODING_AGENT_DIR must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'for d in sessions auth trust models metadata cache projects workspaces providers state tasks status todos plans jobs runs ui statusline; do printf ok > "$PI_CODING_AGENT_DIR/$d/devbox-validation" || exit 1; done; printf PI_STATE_OK' 2>&1 || true)"
+        if [[ "${output}" == 'PI_STATE_OK' ]] && [[ -f "${test_home}/.pi/agent/sessions/devbox-validation" ]] &&
+            [[ -f "${test_home}/.pi/agent/auth/devbox-validation" ]] && [[ -f "${test_home}/.pi/agent/cache/devbox-validation" ]] &&
+            [[ -f "${test_home}/.pi/agent/projects/devbox-validation" ]] && [[ -f "${test_home}/.pi/agent/workspaces/devbox-validation" ]] &&
+            [[ -f "${test_home}/.pi/agent/providers/devbox-validation" ]] && [[ -f "${test_home}/.pi/agent/state/devbox-validation" ]] &&
+            [[ -f "${test_home}/.pi/agent/tasks/devbox-validation" ]] && [[ -f "${test_home}/.pi/agent/statusline/devbox-validation" ]]; then
+            validation_pass 'Test E.3 PASS: role-based Pi runtime/status state subdirectories are writable'
+        else
+            validation_fail "Test E.3 FAIL: role-based Pi runtime/status state was not writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.config/pi/config.toml" "$HOME/.local/share/pi/resource.txt" >/dev/null || exit 1; if printf bad > "$HOME/.config/pi/config.toml" 2>/dev/null; then printf XDG_CONFIG_WRITE_ALLOWED; else printf XDG_CONFIG_RO; fi; if printf bad > "$HOME/.local/share/pi/resource.txt" 2>/dev/null; then printf XDG_DATA_WRITE_ALLOWED; else printf XDG_DATA_RO; fi' 2>&1 || true)"
+        if [[ "${output}" == *XDG_CONFIG_RO* ]] && [[ "${output}" == *XDG_DATA_RO* ]] &&
+            [[ "${output}" != *XDG_CONFIG_WRITE_ALLOWED* ]] && [[ "${output}" != *XDG_DATA_WRITE_ALLOWED* ]] &&
+            [[ "$(<"${test_home}/.config/pi/config.toml")" == 'pi-xdg-config' ]] &&
+            [[ "$(<"${test_home}/.local/share/pi/resource.txt")" == 'pi-xdg-data' ]]; then
+            validation_pass 'Test E.11 PASS: Pi XDG config/data resources are visible read-only'
+        else
+            validation_fail "Test E.11 FAIL: Pi XDG config/data resource policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf state-ok > "$HOME/.local/state/pi/status" || exit 1; printf cache-ok > "$HOME/.cache/pi/status" || exit 1; printf PI_XDG_STATE_OK' 2>&1 || true)"
+        if [[ "${output}" == 'PI_XDG_STATE_OK' ]] && [[ "$(<"${test_home}/.local/state/pi/status")" == 'state-ok' ]] &&
+            [[ "$(<"${test_home}/.cache/pi/status")" == 'cache-ok' ]]; then
+            validation_pass 'Test E.12 PASS: Pi XDG state/cache dirs are writable without broad XDG exposure'
+        else
+            validation_fail "Test E.12 FAIL: Pi XDG state/cache dirs were not writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # XDG_STATE_HOME expands inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'install -d -m 0700 "$XDG_STATE_HOME/ramona" "$XDG_STATE_HOME/ramona/checkpoints" "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation" || exit 1; umask 077; printf %s ramona-checkpoint-v1 > "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation/checkpoint" || exit 1; chmod 0600 "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation/checkpoint" || exit 1; test ! -e "$XDG_STATE_HOME/private-data/hidden.txt" || exit 1; printf RAMONA_WRITE_OK' 2>&1 || true)"
+        if [[ "${output}" == 'RAMONA_WRITE_OK' ]] &&
+            [[ "$(<"${test_home}/.local/state/ramona/checkpoints/devbox-validation/checkpoint")" == 'ramona-checkpoint-v1' ]] &&
+            [[ "$(stat -c %a -- "${test_home}/.local/state/ramona")" == 700 ]] &&
+            [[ "$(stat -c %a -- "${test_home}/.local/state/ramona/checkpoints")" == 700 ]] &&
+            [[ "$(stat -c %a -- "${test_home}/.local/state/ramona/checkpoints/devbox-validation")" == 700 ]] &&
+            [[ "$(stat -c %a -- "${test_home}/.local/state/ramona/checkpoints/devbox-validation/checkpoint")" == 600 ]]; then
+            validation_pass 'Test E.12a PASS: default devbox persists only private Ramona checkpoint state with exact bytes and modes'
+        else
+            validation_fail "Test E.12a FAIL: Ramona checkpoint persistence or privacy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # XDG_STATE_HOME expands inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation/checkpoint"' 2>&1 || true)"
+        if [[ "${output}" == 'ramona-checkpoint-v1' ]]; then
+            validation_pass 'Test E.12b PASS: a fresh devbox reads the persisted checkpoint bytes'
+        else
+            validation_fail "Test E.12b FAIL: a fresh devbox could not read the checkpoint (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # XDG_STATE_HOME expands inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --locked -x /bin/bash --noprofile --norc -lc 'install -d -m 0700 "$XDG_STATE_HOME/ramona/checkpoints/locked"; umask 077; printf locked > "$XDG_STATE_HOME/ramona/checkpoints/locked/checkpoint"; printf RAMONA_LOCKED_WRITE_OK' 2>&1 || true)"
+        if [[ "${output}" == 'RAMONA_LOCKED_WRITE_OK' ]] && [[ ! -e "${test_home}/.local/state/ramona/checkpoints/locked/checkpoint" ]]; then
+            validation_pass 'Test E.12c PASS: locked Ramona state remains ephemeral'
+        else
+            validation_fail "Test E.12c FAIL: locked Ramona state persisted or was not writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # XDG_STATE_HOME expands inside the sandboxed shell.
+        output="$(DEVBOX_VALIDATION_XDG_STATE_HOME="${custom_xdg_state_home}" run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test "$XDG_STATE_HOME" = "$HOME/.local/state" || exit 1; install -d -m 0700 "$XDG_STATE_HOME/ramona/checkpoints/custom"; umask 077; printf %s custom-checkpoint-v1 > "$XDG_STATE_HOME/ramona/checkpoints/custom/checkpoint"; chmod 0600 "$XDG_STATE_HOME/ramona/checkpoints/custom/checkpoint"; printf RAMONA_CUSTOM_XDG_OK' 2>&1 || true)"
+        if [[ "${output}" == 'RAMONA_CUSTOM_XDG_OK' ]] &&
+            [[ "$(<"${custom_xdg_state_home}/ramona/checkpoints/custom/checkpoint")" == 'custom-checkpoint-v1' ]] &&
+            [[ ! -e "${test_home}/.local/state/ramona/checkpoints/custom/checkpoint" ]]; then
+            validation_pass 'Test E.12d PASS: custom XDG state maps only Ramona to the canonical sandbox path'
+        else
+            validation_fail "Test E.12d FAIL: custom XDG Ramona mapping failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.pi/agent/settings.json" "$HOME/.pi/agent/trust.json" >/dev/null || exit 1; mkdir "$HOME/.pi/agent/settings.json.lock" "$HOME/.pi/agent/trust.json.lock" || exit 1; if printf bad > "$HOME/.pi/agent/settings.json" 2>/dev/null; then printf ROOT_CONFIG_WRITE_ALLOWED; else printf ROOT_CONFIG_RO; fi; test -w "$HOME/.pi/agent/trust.json" || exit 1; rmdir "$HOME/.pi/agent/settings.json.lock" "$HOME/.pi/agent/trust.json.lock" || exit 1; printf PI_AGENT_ROOT_LOCK_OK' 2>&1 || true)"
+        if [[ "${output}" == *ROOT_CONFIG_RO* && "${output}" == *PI_AGENT_ROOT_LOCK_OK* ]] &&
+            [[ "$(<"${test_home}/.pi/agent/settings.json")" == '{"theme":"original"}' ]] &&
+            [[ "$(<"${test_home}/.pi/agent/trust.json")" == '{"trusted":false}' ]] &&
+            [[ "$(stat -c %a -- "${test_home}/.pi/agent/trust.json")" == 600 ]]; then
+            validation_pass 'Test E.9 PASS: Pi root config is read-only while machine-local trust and disposable locks work'
+        else
+            validation_fail "Test E.9 FAIL: Pi root config/lock policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -r "$HOME/.pi/agent/fancy-footer.json" && test -r "$HOME/.pi/agent/galactica-status.json" || exit 1; python3 -c "import json,sys; expected=(\"fancy-footer\",\"galactica-status\"); data=[json.load(open(path, encoding=\"utf-8\")) for path in sys.argv[1:]]; assert [item[\"devboxSentinel\"] for item in data] == list(expected)" "$HOME/.pi/agent/fancy-footer.json" "$HOME/.pi/agent/galactica-status.json" || exit 1; if { printf bad > "$HOME/.pi/agent/fancy-footer.json"; } 2>/dev/null; then exit 1; fi; if { printf bad > "$HOME/.pi/agent/galactica-status.json"; } 2>/dev/null; then exit 1; fi; printf PI_FOOTER_CONFIG_OK' 2>&1 || true)"
+        if [[ "${output}" == 'PI_FOOTER_CONFIG_OK' ]] &&
+            [[ "$(<"${pi_root_config_source_dir}/fancy-footer.json")" == '{"devboxSentinel":"fancy-footer"}' ]] &&
+            [[ "$(<"${pi_root_config_source_dir}/galactica-status.json")" == '{"devboxSentinel":"galactica-status"}' ]]; then
+            validation_pass 'Test E.9a PASS: Fancy Footer and Galactica root config JSON is visible through symlink-safe read-only mounts'
+        else
+            validation_fail "Test E.9a FAIL: Fancy Footer/Galactica root config JSON was missing or invalid (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -r "$HOME/.pi/agent/scripts/devbox-helper" || exit 1; if { printf bad > "$HOME/.pi/agent/scripts/blocked"; } 2>/dev/null; then exit 1; fi; printf PI_SCRIPTS_RO' 2>&1 || true)"
+        if [[ "${output}" == 'PI_SCRIPTS_RO' ]] && [[ ! -e "${test_home}/.pi/agent/scripts/blocked" ]]; then
+            validation_pass 'Test E.9b PASS: Pi scripts are visible read-only'
+        else
+            validation_fail "Test E.9b FAIL: Pi scripts were missing or writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'for path in "$HOME/.pi/agent/agents/ramona-step-engineer.md" "$HOME/.pi/agent/taskflows/ramona-happy-path.json" "$HOME/.local/share/openspec/schemas/ramona-idea/schema.yaml" "$HOME/.local/share/openspec/schemas/ramona-plan/schema.yaml"; do cat "$path" >/dev/null || exit 1; if { printf bad > "$path"; } 2>/dev/null; then printf "WRITE_ALLOWED:%s" "$path"; exit 1; fi; done; test ! -e "$HOME/.local/share/private-data/hidden.txt" || exit 1; printf GLOBAL_RESOURCES_RO' 2>&1 || true)"
+        if [[ "${output}" == 'GLOBAL_RESOURCES_RO' ]] &&
+            [[ "$(<"${test_home}/.pi/agent/agents/ramona-step-engineer.md")" == 'agent-resource' ]] &&
+            [[ "$(<"${test_home}/.pi/agent/taskflows/ramona-happy-path.json")" == 'taskflow-resource' ]] &&
+            [[ "$(<"${test_home}/.local/share/openspec/schemas/ramona-idea/schema.yaml")" == 'idea-schema' ]] &&
+            [[ "$(<"${test_home}/.local/share/openspec/schemas/ramona-plan/schema.yaml")" == 'plan-schema' ]]; then
+            validation_pass 'Test E.13 PASS: default devbox exposes only global agents, Taskflows, and user schemas read-only'
+        else
+            validation_fail "Test E.13 FAIL: default global resource policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox_with_home "${linked_resource_home}" "${linked_resource_home}/.pi/agent" -- "${test_project}" -q --backend bwrap --locked -x /bin/bash --noprofile --norc -lc 'for path in "$HOME/.pi/agent/agents/ramona-step-engineer.md" "$HOME/.pi/agent/taskflows/ramona-happy-path.json" "$HOME/.local/share/openspec/schemas/ramona-idea/schema.yaml" "$HOME/.local/share/openspec/schemas/ramona-plan/schema.yaml"; do cat "$path" >/dev/null || exit 1; if { printf bad > "$path"; } 2>/dev/null; then printf "WRITE_ALLOWED:%s" "$path"; exit 1; fi; done; test ! -e "$HOME/.local/share/private-data/hidden.txt" || exit 1; printf LOCKED_LINKED_RESOURCES_RO' 2>&1 || true)"
+        if [[ "${output}" == 'LOCKED_LINKED_RESOURCES_RO' ]] &&
+            [[ "$(<"${linked_pi_agents}/ramona-step-engineer.md")" == 'linked-agent-resource' ]] &&
+            [[ "$(<"${linked_pi_taskflows}/ramona-happy-path.json")" == 'linked-taskflow-resource' ]] &&
+            [[ "$(<"${linked_resource_home}/.local/share/openspec/schemas/ramona-idea/schema.yaml")" == 'linked-idea-schema' ]] &&
+            [[ "$(<"${linked_resource_home}/.local/share/openspec/schemas/ramona-plan/schema.yaml")" == 'linked-plan-schema' ]]; then
+            validation_pass 'Test E.14 PASS: locked devbox resolves symlink-backed Pi resources and keeps schemas read-only'
+        else
+            validation_fail "Test E.14 FAIL: locked symlink-backed resource policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.pi/providers/catalog.txt" "$HOME/.pi/models/catalog.txt" >/dev/null || exit 1; if printf bad > "$HOME/.pi/providers/catalog.txt" 2>/dev/null; then printf PROVIDER_WRITE_ALLOWED; else printf PROVIDER_CONFIG_RO; fi; if printf bad > "$HOME/.pi/models/catalog.txt" 2>/dev/null; then printf MODEL_WRITE_ALLOWED; else printf MODEL_CONFIG_RO; fi' 2>&1 || true)"
+        if [[ "${output}" == *PROVIDER_CONFIG_RO* ]] && [[ "${output}" == *MODEL_CONFIG_RO* ]] &&
+            [[ "${output}" != *PROVIDER_WRITE_ALLOWED* ]] && [[ "${output}" != *MODEL_WRITE_ALLOWED* ]] &&
+            [[ "$(<"${test_home}/.pi/providers/catalog.txt")" == 'provider-catalog' ]] &&
+            [[ "$(<"${test_home}/.pi/models/catalog.txt")" == 'model-catalog' ]]; then
+            validation_pass 'Test E.6 PASS: provider/model config resources are visible read-only'
+        else
+            validation_fail "Test E.6 FAIL: provider/model config read-only check failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.agents/skills/example/SKILL.md" >/dev/null || exit 1; printf shared-agent-ok > "$HOME/.agents/devbox-validation" && printf SHARED_AGENTS_RW' 2>&1 || true)"
+        if [[ "${output}" == 'SHARED_AGENTS_RW' ]] && [[ "$(<"${test_home}/.agents/devbox-validation")" == 'shared-agent-ok' ]]; then
+            validation_pass 'Test E.7 PASS: shared ~/.agents resources are readable and writable'
+        else
+            validation_fail "Test E.7 FAIL: shared ~/.agents policy failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        local linked_skills_home="${validation_root}/linked-skills-home"
+        mkdir -p -- "${linked_skills_home}/.pi/agent"
+        ln -s "${test_project}/.agents" "${linked_skills_home}/.agents"
+        output="$(run_validation_devbox_with_home "${linked_skills_home}" "${linked_skills_home}/.pi/agent" -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc "cat \"\$HOME/.agents/skills/example/SKILL.md\" >/dev/null || exit 1; cat ${project_skill_file_q} >/dev/null || exit 1; printf SKILL_ALIAS_RESOLVED_OK" 2>&1 || true)"
+        if [[ "${output}" == 'SKILL_ALIAS_RESOLVED_OK' ]]; then
+            validation_pass 'Test E.10 PASS: symlinked shared agent resources resolve without hiding project skills'
+        else
+            validation_fail "Test E.10 FAIL: symlinked shared/project skill visibility failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf project-pi-ok > .pi/devbox-default && cat .pi/devbox-default' 2>&1 || true)"
+        if [[ "${output}" == 'project-pi-ok' && "$(<"${test_project}/.pi/devbox-default")" == 'project-pi-ok' ]]; then
+            validation_pass 'Test E.8 PASS: project .pi is writable inside the selected target'
+        else
+            validation_fail "Test E.8 FAIL: project .pi write failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        if output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-pi-config -x /bin/bash --noprofile --norc -lc 'printf devbox-pi-ok > "$HOME/.pi/devbox-validation-allowed" && cat "$HOME/.pi/devbox-validation-allowed"' 2>&1)" &&
+            [[ "${output}" == "devbox-pi-ok" ]] && [[ -f "${test_home}/.pi/devbox-validation-allowed" ]] &&
+            [[ "$(<"${test_home}/.pi/devbox-validation-allowed")" == "devbox-pi-ok" ]]; then
+            validation_pass 'Test E.4 PASS: --allow-pi-config permits temp ~/.pi writes'
+        else
+            validation_fail "Test E.4 FAIL: --allow-pi-config did not permit temp ~/.pi writes (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        local symlink_home="${validation_root}/symlink-home"
+        local symlink_target_dir="${symlink_home}/.pi/linked-targets"
+        mkdir -p -- "${symlink_home}/.pi/agent" "${symlink_home}/.pi" "${symlink_target_dir}"
+        printf 'symlink-pi-config\n' >"${symlink_target_dir}/config"
+        ln -s "${symlink_target_dir}/config" "${symlink_home}/.pi/config"
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox_with_home "${symlink_home}" "${symlink_home}/.pi/agent" -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.pi/config" || exit 1; if printf bad > "$HOME/.pi/config" 2>/dev/null; then printf SYMLINK_WRITE_ALLOWED; else printf SYMLINK_CONFIG_RO; fi' 2>&1 || true)"
+        if [[ "${output}" == *symlink-pi-config* ]] && [[ "${output}" == *SYMLINK_CONFIG_RO* ]] &&
+            [[ "${output}" != *SYMLINK_WRITE_ALLOWED* ]] && [[ "$(<"${symlink_target_dir}/config")" == 'symlink-pi-config' ]]; then
+            validation_pass 'Test E.5 PASS: symlinked Pi config target is visible read-only'
+        else
+            validation_fail "Test E.5 FAIL: symlinked Pi config was not visible (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # SSH client paths and settings expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --no-ssh-agent -x /bin/bash --noprofile --norc -lc '
+            ssh -G localhost >/dev/null 2>&1 || exit 1
+            test "$(ssh -F "$HOME/.ssh/config" -G devbox-ssh-fixture 2>/dev/null | awk '\''$1 == "port" { print $2; exit }'\'')" = 2355 || exit 1
+            test -r "$HOME/.ssh/config" || exit 1
+            if { printf bad >>"$HOME/.ssh/config"; } 2>/dev/null; then exit 1; fi
+            grep -qx fixture-host-key "$HOME/.ssh/known_hosts" || exit 1
+            printf sandbox-only >>"$HOME/.ssh/known_hosts" || exit 1
+            test -r "$HOME/.ssh/ssh-keys/personal/devbox-test.pub" || exit 1
+            if { printf bad >>"$HOME/.ssh/ssh-keys/personal/devbox-test.pub"; } 2>/dev/null; then exit 1; fi
+            test ! -e "$HOME/.ssh/ssh-keys/personal/devbox-test" || exit 1
+            printf SSH_CLIENT_STATE_OK
+        ' 2>&1 || true)"
+        if [[ "${output}" == 'SSH_CLIENT_STATE_OK' ]] && [[ "$(<"${test_home}/.ssh/known_hosts")" == 'fixture-host-key' ]]; then
+            validation_pass 'Test H.1a PASS: SSH client config, ephemeral host trust, and public keys are safely exposed'
+        else
+            validation_fail "Test H.1a FAIL: SSH client integration failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        if command -v ssh-agent >/dev/null 2>&1 && command -v ssh-add >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1; then
+            rm -f -- "${ssh_test_key}" "${ssh_test_key}.pub" "${ssh_agent_socket}"
+            ssh-keygen -q -t ed25519 -N '' -C devbox-validation -f "${ssh_test_key}"
+            ssh-agent -D -a "${ssh_agent_socket}" >/dev/null 2>&1 &
+            LIVE_VALIDATION_SSH_AGENT_PID=$!
+            for _ in {1..50}; do
+                [[ -S "${ssh_agent_socket}" ]] && break
+                sleep 0.02
+            done
+            SSH_AUTH_SOCK="${ssh_agent_socket}" ssh-add "${ssh_test_key}" >/dev/null 2>&1
+            # shellcheck disable=SC2016 # $SSH_AUTH_SOCK and $HOME expand inside the sandboxed shell.
+            output="$(DEVBOX_VALIDATION_SSH_AUTH_SOCK="${ssh_agent_socket}" run_validation_devbox -- "${test_project}" -q --backend bwrap --ssh-agent -x /bin/bash --noprofile --norc -lc '
+                test -S "$SSH_AUTH_SOCK" || exit 1
+                ssh-add -T "$HOME/.ssh/ssh-keys/personal/devbox-test.pub" || exit 1
+                printf SSH_AGENT_SIGNING_OK
+            ' 2>&1 || true)"
+            if [[ "${output}" == 'SSH_AGENT_SIGNING_OK' ]]; then
+                validation_pass 'Test H.1b PASS: --ssh-agent forwarded agent performs a signing operation'
+            else
+                validation_fail "Test H.1b FAIL: --ssh-agent agent signing failed (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+            # shellcheck disable=SC2016 # $SSH_AUTH_SOCK expands inside the sandboxed shell.
+            output="$(DEVBOX_VALIDATION_SSH_AUTH_SOCK="${ssh_agent_socket}" run_validation_devbox -- "${test_project}" -q --backend bwrap --no-ssh-agent -x /bin/bash --noprofile --norc -lc 'test -z "${SSH_AUTH_SOCK:-}" && printf NO_SSH_AGENT' 2>&1 || true)"
+            if [[ "${output}" == 'NO_SSH_AGENT' ]]; then
+                validation_pass 'Test H.1c PASS: --no-ssh-agent disables forwarding'
+            else
+                validation_fail "Test H.1c FAIL: --no-ssh-agent did not disable forwarding (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+            # shellcheck disable=SC2016 # $SSH_AUTH_SOCK expands inside the sandboxed shell.
+            output="$(DEVBOX_VALIDATION_SSH_AUTH_SOCK="${ssh_agent_socket}" run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -z "${SSH_AUTH_SOCK:-}" && printf NO_SSH_AGENT_BY_DEFAULT' 2>&1 || true)"
+            if [[ "${output}" == 'NO_SSH_AGENT_BY_DEFAULT' ]]; then
+                validation_pass 'Test H.1e PASS: SSH agent forwarding is off by default'
+            else
+                validation_fail "Test H.1e FAIL: SSH agent was forwarded without --ssh-agent (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+            kill "${LIVE_VALIDATION_SSH_AGENT_PID}" 2>/dev/null || true
+            wait "${LIVE_VALIDATION_SSH_AGENT_PID}" 2>/dev/null || true
+            LIVE_VALIDATION_SSH_AGENT_PID=""
+        else
+            printf 'ℹ️  Test H.1b/H.1c SKIP: OpenSSH agent test tools unavailable\n'
+        fi
+
+        # shellcheck disable=SC2016 # SSH paths and environment expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --locked -x /bin/bash --noprofile --norc -lc '
+            test -z "${SSH_AUTH_SOCK:-}" || exit 1
+            test ! -e "$HOME/.ssh/config" || exit 1
+            test ! -e "$HOME/.ssh/known_hosts" || exit 1
+            test ! -e "$HOME/.ssh/ssh-keys/personal/devbox-test.pub" || exit 1
+            printf LOCKED_SSH_HIDDEN
+        ' 2>&1 || true)"
+        if [[ "${output}" == 'LOCKED_SSH_HIDDEN' ]]; then
+            validation_pass 'Test H.1d PASS: --locked hides user SSH metadata and agent access'
+        else
+            validation_fail "Test H.1d FAIL: --locked exposed SSH integration (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # Environment variables must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test -n "$TERM" && test -n "$COLORTERM" && test -n "$LANG" && test -n "$SHELL" && test "$GIT_OPTIONAL_LOCKS" = "0" && printf TUI_ENV_OK' 2>&1 || true)"
+        if [[ "${output}" == 'TUI_ENV_OK' ]]; then
+            validation_pass 'Test H.2 PASS: TUI environment variables are present'
+        else
+            validation_fail "Test H.2 FAIL: missing TUI environment variables (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # Terminal env/config variables must expand inside the sandboxed shell.
+        output="$(run_devbox_terminal_fixture -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.config/starship.toml" "$XDG_CONFIG_HOME/starship.toml" "$HOME/.zshenv" "$ZDOTDIR/.zshrc" >/dev/null || exit 1; if printf blocked > "$HOME/.zshrc" 2>/dev/null; then printf WRITE_ALLOWED; else printf TERMINAL_CONFIG_RO; fi' 2>&1 || true)"
+        if [[ "${output}" == *TERMINAL_CONFIG_RO* ]] && [[ "${output}" != *WRITE_ALLOWED* ]] && [[ "$(<"${test_home}/.zshrc")" == 'validation-zshrc' ]]; then
+            validation_pass 'Test H.3 PASS: terminal config files are readable and read-only'
+        else
+            validation_fail "Test H.3 FAIL: terminal config read-only check failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # EDITOR/VISUAL expand inside the sandboxed shell.
+        output="$(run_devbox_terminal_fixture -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test "$EDITOR" = "$HOME/.config/nvim/scripts/opencode-editor" && test "$VISUAL" = "$EDITOR" && test -x "$EDITOR" && if { printf bad > "$EDITOR"; } 2>/dev/null; then exit 1; fi; printf NVIM_EDITOR_OK' 2>&1 || true)"
+        if [[ "${output}" == *NVIM_EDITOR_OK* ]] && [[ "$(head -n 1 "${terminal_nvim_editor}")" == '#!/usr/bin/env bash' ]]; then
+            validation_pass 'Test H.3b PASS: devbox-compatible Neovim EDITOR/VISUAL bridge is read-only'
+        else
+            validation_fail "Test H.3b FAIL: Neovim editor bridge failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # Runtime variables expand inside the sandboxed shell.
+        editor_runtime_probe="$(run_devbox_terminal_fixture -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf shared-editor-runtime > "$TMPDIR/host-visible"; printf "%s" "$TMPDIR/host-visible"' 2>&1 || true)"
+        if [[ -f "${editor_runtime_probe}" && "$(<"${editor_runtime_probe}")" == shared-editor-runtime ]]; then
+            validation_pass 'Test H.3c PASS: active-Neovim editor temp files are visible at the identical host path'
+            rm -f -- "${editor_runtime_probe}"
+        else
+            validation_fail "Test H.3c FAIL: editor runtime was not host-visible (${editor_runtime_probe})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        if [[ -S "${terminal_nvim_socket}" && -S "${terminal_nvim_listen_socket}" && -S "${terminal_tmux_socket}" ]]; then
+            # shellcheck disable=SC2016 # Terminal socket variables must expand inside the sandboxed shell.
+            output="$(run_devbox_terminal_fixture -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'tmux_socket="${TMUX%%,*}"; test -S "$NVIM" && test -S "$NVIM_LISTEN_ADDRESS" && test -S "$tmux_socket" && test "$TMUX_PANE" = "%7" && printf TERMINAL_SOCKET_OK' 2>&1 || true)"
+            if [[ "${output}" == 'TERMINAL_SOCKET_OK' ]]; then
+                validation_pass 'Test H.4 PASS: terminal sockets are exact-bound and env is preserved'
+            else
+                validation_fail "Test H.4 FAIL: terminal socket forwarding check failed (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+
+            # shellcheck disable=SC2016 # Terminal variables expand inside the sandboxed shell.
+            output="$(run_devbox_terminal_fixture -- "${test_project}" -q --backend bwrap --no-nvim-remote -x /bin/bash --noprofile --norc -lc 'tmux_socket="${TMUX%%,*}"; test -z "${NVIM:-}" && test -z "${NVIM_LISTEN_ADDRESS:-}" && test -S "$tmux_socket" && test "$TMUX_PANE" = "%7" && test "$EDITOR" = v_quickedit_hover && printf NVIM_REMOTE_DISABLED' 2>&1 || true)"
+            if [[ "${output}" == 'NVIM_REMOTE_DISABLED' ]]; then
+                validation_pass 'Test H.4b PASS: --no-nvim-remote disables Neovim while retaining exact tmux integration'
+            else
+                validation_fail "Test H.4b FAIL: --no-nvim-remote policy failed (${output})"
+                failed_tests=$((failed_tests + 1))
+            fi
+        else
+            printf 'ℹ️  Test H.4/H.4b SKIP: python3 unavailable for fake Unix socket fixtures\n'
+        fi
+
+        output="$(run_devbox_terminal_fixture -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc "test ! -e ${terminal_runtime_marker_q} && printf NO_RUNTIME_WIDE" 2>&1 || true)"
+        if [[ "${output}" == 'NO_RUNTIME_WIDE' ]]; then
+            validation_pass 'Test H.5 PASS: broad runtime directory is not exposed'
+        else
+            validation_fail "Test H.5 FAIL: broad runtime directory was visible (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'pwd' 2>&1 || true)"
+        if [[ "${output}" == "${test_project}" ]]; then
+            validation_pass 'Test I.1 PASS: project path is preserved inside sandbox'
+        else
+            validation_fail "Test I.1 FAIL: project path changed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'test "$DEVBOX_ACTIVE" = 1 && test "$DEVBOX_PROJECT_ROOT" = "$PWD" && test "$DEVBOX_GIT_POLICY" = wrapped && test "$DEVBOX_GIT_WRAPPER" = devbox-git && test -r "$DEVBOX_AGENT_CONTEXT_FILE" && grep -q DEVBOX_GIT_POLICY=wrapped "$DEVBOX_AGENT_CONTEXT_FILE" && printf DEVBOX_CONTEXT_OK' 2>&1 || true)"
+        if [[ "${output}" == 'DEVBOX_CONTEXT_OK' ]]; then
+            validation_pass 'Test I.2 PASS: Devbox identity and separate agent context are exposed'
+        else
+            validation_fail "Test I.2 FAIL: Devbox agent context was unavailable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${target_file_path}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc "cat ${sibling_file_path_q}" 2>&1 || true)"
+        if [[ "${output}" == 'beta' ]]; then
+            validation_pass 'Test L.1 PASS: file target mode keeps sibling files readable'
+        else
+            validation_fail "Test L.1 FAIL: sibling read output was ${output}"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${target_file_path}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc "printf updated > ${target_file_path_q} && cat ${target_file_path_q}" 2>&1 || true)"
+        if [[ "${output}" == 'updated' && "$(<"${target_file_path}")" == 'updated' ]]; then
+            validation_pass 'Test L.2 PASS: writable single-file target changes sync back on success'
+        else
+            validation_fail "Test L.2 FAIL: writable single-file target did not sync (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${target_file_path}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc "printf blocked > ${sibling_file_path_q}" 2>&1 || true)"
+        if [[ "${output}" =~ Read-only|Permission\ denied|cannot\ create|Operation\ not\ permitted ]] && [[ "$(<"${sibling_file_path}")" == 'beta' ]]; then
+            validation_pass 'Test L.3 PASS: writable single-file mode keeps siblings read-only'
+        else
+            validation_fail "Test L.3 FAIL: sibling write was not blocked (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'git --devbox-git-version' 2>&1 || true)"
+        if [[ "${output}" == devbox-git* ]]; then
+            validation_pass 'Test M.1 PASS: /usr/bin/git is shadowed by devbox-git'
+        else
+            validation_fail "Test M.1 FAIL: /usr/bin/git is not shadowed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'git push 2>&1' 2>&1 || true)"
+        if [[ "${output}" == *'fatal: devbox blocked git push'* ]]; then
+            validation_pass 'Test M.2 PASS: git push is denied by the Devbox policy wrapper'
+        else
+            validation_fail "Test M.2 FAIL: git push was not denied (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        git -C "${test_project}" init -q
+        git -C "${test_project}" config user.email devbox-validation@example.invalid
+        git -C "${test_project}" config user.name 'devbox validation'
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-git -x /bin/bash --noprofile --norc -lc 'printf commit-ok > committed.txt && git add committed.txt && git commit -m "validation commit" >/dev/null && git log --oneline -1' 2>&1 || true)"
+        if [[ "${output}" == *'validation commit'* ]]; then
+            validation_pass 'Test M.3 PASS: git add/commit works with --allow-git'
+        else
+            validation_fail "Test M.3 FAIL: git add/commit failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        git -C "${test_project}" branch validation-switch-target >/dev/null 2>&1 || true
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-git -x /bin/bash --noprofile --norc -lc 'git switch --quiet validation-switch-target >/dev/null && git branch --show-current' 2>&1 || true)"
+        if [[ "${output}" == 'validation-switch-target' ]]; then
+            validation_pass 'Test M.4 PASS: git switch existing branch works with --allow-git'
+        else
+            validation_fail "Test M.4 FAIL: git switch existing branch failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-git -x /bin/bash --noprofile --norc -lc 'git switch --quiet -c validation-switch-created >/dev/null && git branch --show-current' 2>&1 || true)"
+        if [[ "${output}" == 'validation-switch-created' ]]; then
+            validation_pass 'Test M.5 PASS: git switch -c creates local branches with --allow-git'
+        else
+            validation_fail "Test M.5 FAIL: git switch -c failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-git -x /bin/bash --noprofile --norc -lc 'git switch --force validation-switch-target 2>&1' 2>&1 || true)"
+        if [[ "${output}" == *'git switch unsafe option: --force'* ]]; then
+            validation_pass 'Test M.6 PASS: unsafe git switch flags are denied'
+        else
+            validation_fail "Test M.6 FAIL: git switch --force was not denied (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --allow-git -x /bin/bash --noprofile --norc -lc 'git reset --hard HEAD 2>&1' 2>&1 || true)"
+        if [[ "${output}" == *'Denied git reset --hard blocked'* ]]; then
+            validation_pass 'Test M.7 PASS: destructive git reset remains denied'
+        else
+            validation_fail "Test M.7 FAIL: git reset --hard was not denied (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --add "${shared_ro_dir}" -x /bin/bash --noprofile --norc -lc "cat ${shared_ro_dir_q}/note.txt" 2>&1 || true)"
+        if [[ "${output}" == 'shared-ro' ]]; then
+            validation_pass 'Test N.1 PASS: --add exposes extra path read-only'
+        else
+            validation_fail "Test N.1 FAIL: --add read failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --add "${shared_ro_dir}" -x /bin/bash --noprofile --norc -lc "printf blocked > ${shared_ro_dir_q}/note.txt" 2>&1 || true)"
+        if [[ "${output}" =~ Read-only|Permission\ denied|cannot\ create|Operation\ not\ permitted ]] && [[ "$(<"${shared_ro_dir}/note.txt")" == 'shared-ro' ]]; then
+            validation_pass 'Test N.2 PASS: --add keeps extra path read-only'
+        else
+            validation_fail "Test N.2 FAIL: --add did not block writes (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap --add-rw "${shared_rw_dir}" -x /bin/bash --noprofile --norc -lc "printf updated > ${shared_rw_dir_q}/note.txt && cat ${shared_rw_dir_q}/note.txt" 2>&1 || true)"
+        if [[ "${output}" == 'updated' ]] && [[ "$(<"${shared_rw_dir}/note.txt")" == 'updated' ]]; then
+            validation_pass 'Test N.3 PASS: --add-rw allows writes'
+        else
+            validation_fail "Test N.3 FAIL: --add-rw write failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+    else
+        printf 'ℹ️  Live bwrap validation skipped because bwrap/probe prerequisites failed\n'
+    fi
+
+    output="$(env HOME="${test_home}" PATH="${PATH}" PI_BIN=/bin/true PI_CODING_AGENT_DIR="${test_home}/.pi/agent" "${script_path}" -- "${test_project}" -q --backend unsupported 2>&1 || true)"
+    if [[ "${output}" == *'devbox supports only the bwrap backend'* ]]; then
+        validation_pass 'Test F.1 PASS: non-Bubblewrap backend requests fail closed'
+    else
+        validation_fail "Test F.1 FAIL: non-Bubblewrap backend request did not fail closed (${output})"
+        failed_tests=$((failed_tests + 1))
+    fi
+
+    output="$(env HOME="${test_home}" PATH="${PATH}" PI_BIN=/bin/true PI_CODING_AGENT_DIR="${test_home}/.pi/agent" DEVBOX_FORCE_PROBE=1 "${script_path}" -- / -q -x /bin/true 2>&1 || true)"
+    if [[ "${output}" == *'refusing to mount the host root writable'* ]]; then
+        validation_pass 'Test F.2 PASS: writable host-root targets are rejected'
+    else
+        validation_fail "Test F.2 FAIL: writable host-root target was not rejected (${output})"
+        failed_tests=$((failed_tests + 1))
+    fi
+
+    rm -rf -- "${validation_root}"
+    LIVE_VALIDATION_ROOT=""
+
+    printf '\n'
+    if [[ "${failed_tests}" -eq 0 ]]; then
+        printf '🎉 All devbox live validation tests passed!\n'
+        return 0
+    fi
+
+    printf '⚠️  %s devbox live validation test(s) failed\n' "${failed_tests}"
+    return 1
+}
+
+run_validation

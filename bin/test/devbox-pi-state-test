@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+readonly TEST_BIN="${TEST_ROOT}/bin"
+readonly CAPTURE="${TEST_ROOT}/bwrap.args"
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+mkdir -p -- "${TEST_BIN}"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${TEST_BIN}/devbox-git"
+cat >"${TEST_BIN}/bwrap" <<'BWRAP'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${1:-}" == --version ]]; then
+    printf 'bubblewrap 1.0.0\n'
+    exit 0
+fi
+if [[ "${1:-}" == --help ]]; then
+    printf '%s\n' --disable-userns
+    exit 0
+fi
+args=("$@")
+for ((index = 0; index < ${#args[@]}; index++)); do
+    if [[ "${args[index]}" == /bin/sh && "${args[index + 1]:-}" == -c ]]; then
+        exit 0
+    fi
+done
+printf '%s\0' "$@" >"${DEVBOX_PI_STATE_CAPTURE}"
+BWRAP
+chmod +x "${TEST_BIN}/devbox-git" "${TEST_BIN}/bwrap"
+
+pass() { printf 'PASS: %s\n' "$1"; }
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
+
+run_box() {
+    local fixture_home="$1"
+    local fixture_target="$2"
+    shift 2
+
+    rm -f -- "${CAPTURE}"
+    env -i \
+        HOME="${fixture_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+        PATH="${TEST_BIN}:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 \
+        DEVBOX_GIT="${TEST_BIN}/devbox-git" DEVBOX_FORCE_PROBE=1 \
+        DEVBOX_PI_STATE_CAPTURE="${CAPTURE}" \
+        "${DEVBOX}" /bin/true -- "${fixture_target}" -q \
+        --no-host-tools --no-aws --no-clipboard --no-ssh-agent "$@"
+}
+
+load_capture() {
+    [[ -f "${CAPTURE}" ]] || fail 'main Bubblewrap launch was not captured'
+    mapfile -d '' -t BWRAP_ARGS <"${CAPTURE}"
+}
+
+assert_sequence() {
+    local description="$1"
+    shift
+    local -a expected=("$@")
+    local index expected_index matched
+
+    for ((index = 0; index <= ${#BWRAP_ARGS[@]} - ${#expected[@]}; index++)); do
+        matched=1
+        for ((expected_index = 0; expected_index < ${#expected[@]}; expected_index++)); do
+            [[ "${BWRAP_ARGS[index + expected_index]}" == "${expected[expected_index]}" ]] || {
+                matched=0
+                break
+            }
+        done
+        if [[ "${matched}" -eq 1 ]]; then
+            pass "${description}"
+            return 0
+        fi
+    done
+    fail "${description}: missing sequence ${expected[*]}"
+}
+
+assert_machine_trust_creation_redirect() {
+    local expected_source="$1"
+    local expected_destination="$2"
+    local index mirror=""
+
+    for ((index = 0; index < ${#BWRAP_ARGS[@]}; index++)); do
+        if [[ "${BWRAP_ARGS[index]}" == --bind && "${BWRAP_ARGS[index + 1]:-}" == "${expected_source}" &&
+            "${BWRAP_ARGS[index + 2]:-}" == */pi-agent-state ]]; then
+            mirror="${BWRAP_ARGS[index + 2]}"
+            break
+        fi
+    done
+    [[ -n "${mirror}" ]] || fail 'machine trust state mirror is missing'
+    assert_sequence 'optional trust-file creation redirects to machine-local state' \
+        --symlink "${mirror}/trust.json" "${expected_destination}"
+}
+
+assert_sequence_absent() {
+    local description="$1"
+    shift
+    local -a expected=("$@")
+    local index expected_index matched
+
+    for ((index = 0; index <= ${#BWRAP_ARGS[@]} - ${#expected[@]}; index++)); do
+        matched=1
+        for ((expected_index = 0; expected_index < ${#expected[@]}; expected_index++)); do
+            [[ "${BWRAP_ARGS[index + expected_index]}" == "${expected[expected_index]}" ]] || {
+                matched=0
+                break
+            }
+        done
+        [[ "${matched}" -eq 0 ]] || fail "${description}: unexpected sequence ${expected[*]}"
+    done
+    pass "${description}"
+}
+
+# A normal local Pi root remains the writable source, with trust permissions
+# normalized only after all leaves have passed symlink validation.
+LOCAL_HOME="${TEST_ROOT}/local-home"
+LOCAL_AGENT="${LOCAL_HOME}/.pi/agent"
+LOCAL_PROJECT="${TEST_ROOT}/local-project"
+mkdir -p -- "${LOCAL_AGENT}/trust" "${LOCAL_AGENT}/scripts" "${LOCAL_PROJECT}"
+printf '{}\n' >"${LOCAL_AGENT}/settings.json"
+printf '{"trusted":false}\n' >"${LOCAL_AGENT}/trust.json"
+printf '#!/usr/bin/env bash\n' >"${LOCAL_AGENT}/scripts/helper"
+chmod 0755 "${LOCAL_AGENT}/trust"
+chmod 0644 "${LOCAL_AGENT}/trust.json"
+run_box "${LOCAL_HOME}" "${LOCAL_PROJECT}"
+load_capture
+[[ "$(stat -c %a "${LOCAL_AGENT}/trust")" == 700 ]] || fail 'local trust directory mode was not normalized to 0700'
+[[ "$(stat -c %a "${LOCAL_AGENT}/trust.json")" == 600 ]] || fail 'local trust file mode was not normalized to 0600'
+pass 'real local trust state is permission-normalized'
+assert_sequence 'real local trust directory is writable' --bind "${LOCAL_AGENT}/trust" "${LOCAL_AGENT}/trust"
+assert_sequence 'real local trust file is writable' --bind "${LOCAL_AGENT}/trust.json" "${LOCAL_AGENT}/trust.json"
+assert_sequence 'Pi scripts are visible read-only' --ro-bind "${LOCAL_AGENT}/scripts" "${LOCAL_AGENT}/scripts"
+
+# A stale writable leaf is rejected before its target or an independent state
+# root can be changed.
+STALE_HOME="${TEST_ROOT}/stale-home"
+STALE_AGENT="${STALE_HOME}/.pi/agent"
+STALE_PROJECT="${TEST_ROOT}/stale-project"
+STALE_TARGET="${STALE_PROJECT}/portable-trust"
+mkdir -p -- "${STALE_AGENT}" "${STALE_TARGET}"
+printf '{}\n' >"${STALE_AGENT}/settings.json"
+printf 'unchanged\n' >"${STALE_TARGET}/sentinel"
+chmod 0750 "${STALE_TARGET}"
+ln -s "${STALE_TARGET}" "${STALE_AGENT}/trust"
+if output="$(run_box "${STALE_HOME}" "${STALE_PROJECT}" 2>&1)"; then
+    fail 'stale trust symlink unexpectedly launched Devbox'
+fi
+[[ "${output}" == *'refusing symlinked writable Pi state'* ]] || fail "stale trust rejection was unclear: ${output}"
+[[ "$(<"${STALE_TARGET}/sentinel")" == unchanged ]] || fail 'stale trust target contents changed'
+[[ "$(stat -c %a "${STALE_TARGET}")" == 750 ]] || fail 'stale trust target mode changed'
+[[ ! -e "${STALE_HOME}/.local/state/devbox/pi-agent" ]] || fail 'machine state was created before stale-link rejection'
+[[ ! -e "${CAPTURE}" ]] || fail 'main Bubblewrap launch occurred after stale-link rejection'
+pass 'stale project trust symlink fails closed without target mutation'
+
+rm -f -- "${STALE_AGENT}/trust"
+mkdir -m 0700 -- "${STALE_AGENT}/trust"
+printf '{"portable":true}\n' >"${STALE_TARGET}/trust.json"
+ln -s "${STALE_TARGET}/trust.json" "${STALE_AGENT}/trust.json"
+if output="$(run_box "${STALE_HOME}" "${STALE_PROJECT}" 2>&1)"; then
+    fail 'stale trust-file symlink unexpectedly launched Devbox'
+fi
+[[ "${output}" == *'refusing symlinked Pi trust file'* ]] || fail "stale trust-file rejection was unclear: ${output}"
+[[ "$(<"${STALE_TARGET}/trust.json")" == '{"portable":true}' ]] || fail 'stale trust-file target changed'
+[[ ! -e "${CAPTURE}" ]] || fail 'main Bubblewrap launch occurred after stale trust-file rejection'
+pass 'stale project trust-file symlink fails closed without target mutation'
+
+LEAF_HOME="${TEST_ROOT}/leaf-managed-home"
+LEAF_AGENT="${LEAF_HOME}/.pi/agent"
+LEAF_PROJECT="${TEST_ROOT}/leaf-managed-project"
+LEAF_PORTABLE="${TEST_ROOT}/leaf-managed-portable"
+LEAF_STATE="${LEAF_HOME}/.local/state/devbox/pi-agent"
+mkdir -p -- "${LEAF_AGENT}/sessions" "${LEAF_PROJECT}" "${LEAF_PORTABLE}/git/github.com/example/cache" \
+    "${LEAF_PORTABLE}/tasks" "${LEAF_PORTABLE}/trust" \
+    "${LEAF_STATE}/git/github.com/example/cache"
+printf '{}\n' >"${LEAF_AGENT}/settings.json"
+printf 'host-session\n' >"${LEAF_AGENT}/sessions/sentinel"
+printf 'portable-cache\n' >"${LEAF_PORTABLE}/git/github.com/example/cache/sentinel"
+printf 'portable-version\n' >"${LEAF_PORTABLE}/git/github.com/example/cache/existing"
+printf 'machine-version\n' >"${LEAF_STATE}/git/github.com/example/cache/existing"
+printf 'portable-task\n' >"${LEAF_PORTABLE}/tasks/sentinel"
+printf 'portable-trust\n' >"${LEAF_PORTABLE}/trust/sentinel"
+ln -s "${LEAF_PORTABLE}/git" "${LEAF_AGENT}/git"
+ln -s "${LEAF_PORTABLE}/tasks" "${LEAF_AGENT}/tasks"
+ln -s "${LEAF_PORTABLE}/trust" "${LEAF_AGENT}/trust"
+run_box "${LEAF_HOME}" "${LEAF_PROJECT}"
+load_capture
+assert_sequence 'a real agent root with managed state leaves switches to machine-local state' \
+    --bind "${LEAF_STATE}/tasks" "${LEAF_AGENT}/tasks"
+assert_sequence 'a regular local session directory remains shared with host Pi' \
+    --bind "${LEAF_AGENT}/sessions" "${LEAF_AGENT}/sessions"
+assert_sequence_absent 'managed state does not redirect regular host sessions' \
+    --bind "${LEAF_STATE}/sessions" "${LEAF_AGENT}/sessions"
+[[ "$(<"${LEAF_AGENT}/sessions/sentinel")" == host-session ]] || fail 'host Pi session changed during mount planning'
+[[ ! -e "${LEAF_STATE}/sessions" ]] || fail 'unused isolated session state was created'
+[[ "$(<"${LEAF_STATE}/git/github.com/example/cache/sentinel")" == portable-cache ]] || fail 'portable Git cache was not seeded machine-locally'
+[[ "$(<"${LEAF_STATE}/git/github.com/example/cache/existing")" == machine-version ]] || fail 'existing machine-local Git cache entry was overwritten'
+[[ -f "${LEAF_STATE}/.portable-git-seeded-v1" ]] || fail 'portable Git cache seed marker was not recorded'
+[[ "$(<"${LEAF_PORTABLE}/git/github.com/example/cache/sentinel")" == portable-cache ]] || fail 'portable Git cache changed during seeding'
+[[ "$(<"${LEAF_PORTABLE}/tasks/sentinel")" == portable-task ]] || fail 'managed portable tasks changed'
+[[ "$(<"${LEAF_PORTABLE}/trust/sentinel")" == portable-trust ]] || fail 'managed portable trust changed'
+pass 'managed state leaves are isolated while the portable Git cache is seeded read-only'
+
+LOCKED_HOME="${TEST_ROOT}/locked-home"
+LOCKED_AGENT_REAL="${TEST_ROOT}/locked-portable-agent"
+LOCKED_PROJECT="${TEST_ROOT}/locked-project"
+mkdir -p -- "${LOCKED_HOME}/.pi" "${LOCKED_AGENT_REAL}" "${LOCKED_PROJECT}"
+ln -s "${LOCKED_AGENT_REAL}" "${LOCKED_HOME}/.pi/agent"
+printf '{}\n' >"${LOCKED_AGENT_REAL}/settings.json"
+run_box "${LOCKED_HOME}" "${LOCKED_PROJECT}" --locked
+[[ ! -e "${LOCKED_HOME}/.local/state/devbox/pi-agent" ]] || fail '--locked created persistent Pi state'
+pass '--locked validates whole-agent isolation without creating persistent state'
+
+# A whole-agent symlink keeps portable resources but sources all writable state
+# from a distinct machine-local root.
+LINK_HOME="${TEST_ROOT}/linked-home"
+LINK_AGENT_LOGICAL="${LINK_HOME}/.pi/agent"
+LINK_AGENT_REAL="${TEST_ROOT}/portable-agent"
+LINK_PROJECT="${TEST_ROOT}/linked-project"
+LINK_STATE="${LINK_HOME}/.local/state/devbox/pi-agent"
+LINK_PORTABLE_SESSIONS="${TEST_ROOT}/portable-sessions"
+mkdir -p -- "${LINK_HOME}/.pi" "${LINK_AGENT_REAL}/trust" \
+    "${LINK_AGENT_REAL}/scripts" "${LINK_PROJECT}" "${LINK_PORTABLE_SESSIONS}"
+ln -s "${LINK_AGENT_REAL}" "${LINK_AGENT_LOGICAL}"
+ln -s "${LINK_PORTABLE_SESSIONS}" "${LINK_AGENT_REAL}/sessions"
+printf '{}\n' >"${LINK_AGENT_REAL}/settings.json"
+printf '{"portable":true}\n' >"${LINK_AGENT_REAL}/trust.json"
+printf 'portable-session\n' >"${LINK_PORTABLE_SESSIONS}/sentinel"
+printf '#!/usr/bin/env bash\n' >"${LINK_AGENT_REAL}/scripts/helper"
+run_box "${LINK_HOME}" "${LINK_PROJECT}"
+load_capture
+[[ -d "${LINK_STATE}/trust" && "$(stat -c %a "${LINK_STATE}/trust")" == 700 ]] || fail 'independent trust directory was not created securely'
+[[ "$(<"${LINK_PORTABLE_SESSIONS}/sentinel")" == portable-session ]] || fail 'portable session state was changed'
+[[ "$(<"${LINK_AGENT_REAL}/trust.json")" == '{"portable":true}' ]] || fail 'portable trust file was changed'
+assert_sequence 'whole-agent sessions use machine-local state' --bind "${LINK_STATE}/sessions" "${LINK_AGENT_REAL}/sessions"
+assert_sequence_absent 'whole-agent sessions never bind the portable source writable' --bind "${LINK_PORTABLE_SESSIONS}" "${LINK_AGENT_REAL}/sessions"
+assert_sequence 'whole-agent scripts remain portable and read-only' --ro-bind "${LINK_AGENT_REAL}/scripts" "${LINK_AGENT_REAL}/scripts"
+assert_sequence_absent 'portable trust file is not exposed by the default closure' --ro-bind "${LINK_AGENT_REAL}/trust.json" "${LINK_AGENT_REAL}/trust.json"
+assert_machine_trust_creation_redirect "${LINK_STATE}" "${LINK_AGENT_REAL}/trust.json"
+
+if output="$(run_box "${LINK_HOME}" "${LINK_PROJECT}" --allow-pi-config 2>&1)"; then
+    fail '--allow-pi-config followed a portable state symlink'
+fi
+[[ "${output}" == *'refusing symlinked writable Pi state'* ]] || fail "--allow-pi-config symlink rejection was unclear: ${output}"
+pass '--allow-pi-config rejects portable writable-state symlinks before mounting the full root'
+
+rm -f -- "${LINK_AGENT_REAL}/sessions"
+mkdir -- "${LINK_AGENT_REAL}/sessions"
+run_box "${LINK_HOME}" "${LINK_PROJECT}" --allow-pi-config
+load_capture
+assert_sequence '--allow-pi-config retains machine-local state overlay' --bind "${LINK_STATE}/sessions" "${LINK_AGENT_REAL}/sessions"
+assert_sequence '--allow-pi-config hides absent local trust over portable trust' --ro-bind /dev/null "${LINK_AGENT_REAL}/trust.json"
+[[ "$(<"${LINK_AGENT_REAL}/trust.json")" == '{"portable":true}' ]] || fail '--allow-pi-config changed portable trust'
+pass 'whole-agent and --allow-pi-config paths preserve trust isolation'
+
+printf 'devbox Pi state isolation tests passed\n'

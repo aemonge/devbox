@@ -94,7 +94,7 @@ else
     if [[ -L "${BIN_DIR}/devbox" ]]; then
         rm -f -- "${BIN_DIR}/devbox"
     fi
-    cp -p -- "${REPO_ROOT}/bin/"* "${BIN_DIR}/"
+    find "${REPO_ROOT}/bin" -maxdepth 1 -type f -exec cp -p -t "${BIN_DIR}/" {} +
     printf 'devbox-installer: installed %s scripts to %s\n' "$(find "${REPO_ROOT}/bin" -maxdepth 1 -type f | wc -l)" "${BIN_DIR}"
 fi
 

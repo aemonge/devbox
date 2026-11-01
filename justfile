@@ -1,8 +1,9 @@
 # devbox repository gates — `just <recipe>`; `just check` before any commit.
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Every shell script (bin/ plus the installer); .md and .ts are not shell.
-shell_scripts := "bin/devbox bin/devbox-git bin/devbox-opencode-guard bin/devbox-opencode-integrity bin/devbox-pi-guard install.sh"
+# Every shell script (bin/ plus installer and adopted legacy test suite);
+# .md and .ts files are not shell.
+shell_scripts := "bin/devbox bin/devbox-git bin/devbox-opencode-guard bin/devbox-opencode-integrity bin/devbox-pi-guard install.sh bin/test/devbox-agent-context-test bin/test/devbox-cache-test bin/test/devbox-git-identity-test bin/test/devbox-git-policy-test bin/test/devbox-live-extended-test bin/test/devbox-live-test bin/test/devbox-opencode-integrity-test bin/test/devbox-opencode-preflight-test bin/test/devbox-parser-test bin/test/devbox-pi-parity-test bin/test/devbox-pi-state-test bin/test/devbox-pty-test bin/test/devbox-skills-symlink-test bin/test/devbox-static-test bin/test/devbox-test-adapter"
 
 # default: run the full gate
 default: check

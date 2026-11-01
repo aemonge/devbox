@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+DEVBOX_GIT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)/devbox-git"
+readonly DEVBOX_GIT
+
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+cat >"${TEST_ROOT}/fake-git" <<'FAKE_GIT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'REAL_GIT %s\n' "$*"
+FAKE_GIT
+chmod +x "${TEST_ROOT}/fake-git"
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+[[ -x "${DEVBOX_GIT}" ]] || fail "devbox-git executable is missing: ${DEVBOX_GIT}"
+
+output="$(DEVBOX_REAL_GIT="${TEST_ROOT}/fake-git" "${DEVBOX_GIT}" --devbox-git-version)"
+[[ "${output}" == 'devbox-git 0.1.0' ]] || fail "unexpected version identity: ${output}"
+printf 'PASS: devbox-git reports its canonical identity\n'
+
+output="$(DEVBOX_REAL_GIT="${TEST_ROOT}/fake-git" "${DEVBOX_GIT}" status)"
+[[ "${output}" == 'REAL_GIT status' ]] || fail "allowed command did not reach real Git: ${output}"
+printf 'PASS: devbox-git delegates allowlisted commands through DEVBOX_REAL_GIT\n'
+
+status=0
+output="$(DEVBOX_REAL_GIT="${TEST_ROOT}/fake-git" "${DEVBOX_GIT}" push 2>&1)" || status=$?
+[[ "${status}" -eq 128 ]] || fail "blocked push returned ${status}: ${output}"
+[[ "${output}" == *'fatal: devbox blocked git push'* ]] || fail "blocked push leaked the old identity: ${output}"
+[[ "${output}" == *'never push from devbox'* ]] || fail "blocked push lacks Devbox guidance: ${output}"
+printf 'PASS: devbox-git denials use the Devbox identity\n'
+
+printf 'devbox-git identity tests passed\n'

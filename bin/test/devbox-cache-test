@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+readonly TEST_HOME="${TEST_ROOT}/home"
+readonly TEST_BIN="${TEST_ROOT}/bin"
+readonly TEST_PROJECT="${TEST_ROOT}/project"
+readonly CALL_LOG="${TEST_ROOT}/bwrap-calls"
+readonly CACHE_FILE="${TEST_HOME}/.cache/devbox/discovery-v2.cache"
+readonly EXECUTION_MARKER="${TEST_ROOT}/cache-content-executed"
+mkdir -p -- "${TEST_HOME}/.pi/agent" "${TEST_BIN}" "${TEST_PROJECT}/.git"
+printf '{}\n' >"${TEST_HOME}/.pi/agent/settings.json"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${TEST_BIN}/pi"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${TEST_BIN}/devbox-git"
+cat >"${TEST_BIN}/bwrap" <<'BWRAP'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%q ' "$@" >>"${DEVBOX_CACHE_TEST_LOG}"
+printf '\n' >>"${DEVBOX_CACHE_TEST_LOG}"
+if [[ "${1:-}" == --version ]]; then
+    printf 'bubblewrap 1.0.0\n'
+    exit 0
+fi
+if [[ "${1:-}" == --help ]]; then
+    printf '%s\n' --disable-userns
+    exit 0
+fi
+exit 0
+BWRAP
+chmod +x "${TEST_BIN}/pi" "${TEST_BIN}/devbox-git" "${TEST_BIN}/bwrap"
+
+run_devbox_home() {
+    local sandbox_home="$1"
+    shift
+
+    env -i \
+        HOME="${sandbox_home}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+        PATH="${TEST_BIN}:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 \
+        DEVBOX_GIT="${TEST_BIN}/devbox-git" DEVBOX_CACHE_TEST_LOG="${CALL_LOG}" \
+        "${DEVBOX}" pi -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent "$@"
+}
+
+run_devbox() {
+    run_devbox_home "${TEST_HOME}"
+}
+
+run_devbox
+if [[ -f "${CACHE_FILE}" && ! -L "${CACHE_FILE}" && "$(stat -c %a "${CACHE_FILE}")" == 600 && "$(wc -l <"${CACHE_FILE}")" -eq 9 ]]; then
+    printf 'PASS: discovery cache is a private regular file with a complete schema\n'
+else
+    printf 'FAIL: discovery cache shape or permissions are invalid\n' >&2
+    exit 1
+fi
+
+: >"${CALL_LOG}"
+run_devbox
+if grep -q -- '--help' "${CALL_LOG}" || grep -q -- '/bin/sh.*-c.*exit\\ 0' "${CALL_LOG}"; then
+    printf 'FAIL: unchanged discovery cache did not suppress capability probes\n' >&2
+    exit 1
+fi
+printf 'PASS: unchanged discovery cache suppresses repeated capability probes\n'
+
+readonly MALICIOUS_GIT="${TEST_BIN}/malicious-git"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${MALICIOUS_GIT}"
+chmod +x "${MALICIOUS_GIT}"
+malicious_git_encoded="$(printf '%s' "${MALICIOUS_GIT}" | base64 --wrap=0)"
+python3 - "${CACHE_FILE}" "${malicious_git_encoded}" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines()
+path.write_text("\n".join(
+    f"DEVBOX_CACHE_DEVBOX_GIT_REALPATH={sys.argv[2]}" if line.startswith("DEVBOX_CACHE_DEVBOX_GIT_REALPATH=") else line
+    for line in lines
+) + "\n")
+PY
+: >"${CALL_LOG}"
+run_devbox
+if grep -Fq -- "${MALICIOUS_GIT}" "${CALL_LOG}" || ! grep -Fq -- "${TEST_BIN}/devbox-git" "${CALL_LOG}"; then
+    printf 'FAIL: poisoned cached Git canonical path was trusted\n' >&2
+    exit 1
+fi
+printf 'PASS: cached Git paths must match freshly resolved canonical paths\n'
+
+printf 'MALICIOUS=%s\n' "$(printf ': >%q' "${EXECUTION_MARKER}" | base64 --wrap=0)" >"${CACHE_FILE}"
+chmod 600 "${CACHE_FILE}"
+run_devbox
+if [[ -e "${EXECUTION_MARKER}" ]]; then
+    printf 'FAIL: untrusted discovery-cache content executed as shell code\n' >&2
+    exit 1
+fi
+printf 'PASS: unknown discovery-cache keys remain inert data\n'
+
+printf 'not-a-valid-cache\n' >"${TEST_ROOT}/cache-target"
+rm -f -- "${CACHE_FILE}"
+ln -s "${TEST_ROOT}/cache-target" "${CACHE_FILE}"
+run_devbox
+if [[ -L "${CACHE_FILE}" || -e "${EXECUTION_MARKER}" ]]; then
+    printf 'FAIL: symlinked discovery cache was trusted or retained\n' >&2
+    exit 1
+fi
+printf 'PASS: symlinked discovery caches are rejected and replaced safely\n'
+
+readonly LOCKED_HOME="${TEST_ROOT}/locked-home"
+mkdir -p -- "${LOCKED_HOME}/.pi/agent"
+printf '{}\n' >"${LOCKED_HOME}/.pi/agent/settings.json"
+run_devbox_home "${LOCKED_HOME}" --locked
+if [[ -e "${LOCKED_HOME}/.cache/devbox" ]]; then
+    printf 'FAIL: --locked wrote discovery state to the host\n' >&2
+    exit 1
+fi
+printf 'PASS: --locked does not create persistent discovery state\n'
+
+printf 'devbox discovery cache tests passed\n'

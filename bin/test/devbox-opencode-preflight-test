@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly DEVBOX="${SCRIPT_DIR}/../devbox"
+readonly OPENCODE_GUARD="${SCRIPT_DIR}/../devbox-opencode-guard"
+readonly INTEGRITY_HELPER="${SCRIPT_DIR}/../devbox-opencode-integrity"
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+
+readonly TEST_HOME="${TEST_ROOT}/home"
+readonly TEST_BIN="${TEST_ROOT}/bin"
+readonly TEST_PROJECT="${TEST_ROOT}/project"
+readonly CONFIG_FILE="${TEST_HOME}/.config/opencode/opencode.json"
+readonly PACKAGE_CACHE="${TEST_HOME}/.cache/opencode/packages"
+readonly BWRAP_MARKER="${TEST_ROOT}/bwrap-main-invoked"
+readonly REAL_OPENCODE_MARKER="${TEST_ROOT}/real-opencode-invoked"
+
+mkdir -p -- "${TEST_BIN}" "${TEST_PROJECT}" "$(dirname "${CONFIG_FILE}")" "${PACKAGE_CACHE}"
+# shellcheck disable=SC2016 # Variables expand when the generated fixture executes.
+printf '%s\n' '#!/usr/bin/env bash' '[[ -z "${OPENCODE_TEST_REAL_MARKER:-}" ]] || : >"${OPENCODE_TEST_REAL_MARKER}"' 'exit 0' >"${TEST_BIN}/opencode"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${TEST_BIN}/devbox-git"
+cat >"${TEST_BIN}/bwrap" <<'BWRAP'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${1:-}" == --version ]]; then
+    printf 'bubblewrap 1.0.0\n'
+    exit 0
+fi
+if [[ "${1:-}" == --help ]]; then
+    printf '%s\n' --disable-userns
+    exit 0
+fi
+args=("$@")
+for ((index = 0; index < ${#args[@]}; index++)); do
+    if [[ "${args[index]}" == -- && "${args[index + 1]:-}" == /bin/sh ]]; then
+        exit 0
+    fi
+done
+: >"${DEVBOX_TEST_BWRAP_MARKER}"
+BWRAP
+chmod +x "${TEST_BIN}/opencode" "${TEST_BIN}/devbox-git" "${TEST_BIN}/bwrap"
+
+run_devbox() {
+    env -i \
+        HOME="${TEST_HOME}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+        PATH="${TEST_BIN}:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 \
+        DEVBOX_GIT="${TEST_BIN}/devbox-git" \
+        DEVBOX_FORCE_PROBE=1 DEVBOX_TEST_BWRAP_MARKER="${BWRAP_MARKER}" \
+        "${DEVBOX}" "$@"
+}
+
+assert_preflight_failure() {
+    local description="$1"
+    local expected="$2"
+    shift 2
+    local output
+    local status
+
+    rm -f -- "${BWRAP_MARKER}"
+    if output="$(run_devbox "$@" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    if [[ "${status}" -ne 0 && ! -e "${BWRAP_MARKER}" && "${output}" == *"${expected}"* ]]; then
+        printf 'PASS: %s\n' "${description}"
+        return 0
+    fi
+    printf 'FAIL: %s (status=%s, bwrap=%s, output=%s)\n' \
+        "${description}" "${status}" "$([[ -e "${BWRAP_MARKER}" ]] && printf invoked || printf not-invoked)" "${output}" >&2
+    exit 1
+}
+
+assert_reaches_bwrap() {
+    local description="$1"
+    shift
+    rm -f -- "${BWRAP_MARKER}"
+    if run_devbox "$@" >/dev/null 2>&1 && [[ -e "${BWRAP_MARKER}" ]]; then
+        printf 'PASS: %s\n' "${description}"
+        return 0
+    fi
+    printf 'FAIL: %s\n' "${description}" >&2
+    exit 1
+}
+
+printf '%s\n' '{"plugin":["missing-plugin"]}' >"${CONFIG_FILE}"
+rm -f -- "${REAL_OPENCODE_MARKER}"
+if DEVBOX_REAL_OPENCODE="${TEST_BIN}/opencode" \
+    DEVBOX_OPENCODE_INTEGRITY_HELPER="${INTEGRITY_HELPER}" \
+    OPENCODE_TEST_REAL_MARKER="${REAL_OPENCODE_MARKER}" \
+    HOME="${TEST_HOME}" XDG_CONFIG_HOME="${TEST_HOME}/.config" XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    "${OPENCODE_GUARD}" run >/dev/null 2>&1; then
+    printf 'FAIL: interactive-shell guard accepted a missing plugin\n' >&2
+    exit 1
+elif [[ ! -e "${REAL_OPENCODE_MARKER}" ]]; then
+    printf 'PASS: interactive-shell OpenCode guard fails before the real executable\n'
+else
+    printf 'FAIL: interactive-shell guard invoked the real executable after preflight failure\n' >&2
+    exit 1
+fi
+
+rm -f -- "${REAL_OPENCODE_MARKER}"
+DEVBOX_REAL_OPENCODE="${TEST_BIN}/opencode" \
+    DEVBOX_OPENCODE_INTEGRITY_HELPER="${INTEGRITY_HELPER}" \
+    OPENCODE_TEST_REAL_MARKER="${REAL_OPENCODE_MARKER}" \
+    HOME="${TEST_HOME}" XDG_CONFIG_HOME="${TEST_HOME}/.config" XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    "${OPENCODE_GUARD}" plugin --global --force missing-plugin
+[[ -e "${REAL_OPENCODE_MARKER}" ]] || {
+    printf 'FAIL: interactive-shell repair command did not reach real OpenCode\n' >&2
+    exit 1
+}
+printf 'PASS: interactive-shell OpenCode guard permits plugin repair commands\n'
+
+assert_preflight_failure \
+    'normal OpenCode startup fails closed before the main sandbox launch' \
+    'cache wrapper is missing' \
+    opencode run -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+
+assert_reaches_bwrap \
+    'OpenCode plugin repair command bypasses the broken-plugin preflight' \
+    opencode plugin --global --force missing-plugin -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+assert_reaches_bwrap \
+    'OpenCode plug alias bypasses the broken-plugin preflight' \
+    opencode plug --global --force missing-plugin -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+assert_reaches_bwrap \
+    'non-OpenCode commands are not coupled to OpenCode plugin integrity' \
+    /bin/true -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+
+printf '%s\n' '{not-json' >"${CONFIG_FILE}"
+assert_preflight_failure \
+    'malformed OpenCode configuration fails closed before launch' \
+    'invalid OpenCode plugin configuration' \
+    opencode run -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+
+readonly VALID_WRAPPER="${PACKAGE_CACHE}/valid-plugin@latest"
+readonly VALID_PACKAGE="${VALID_WRAPPER}/node_modules/valid-plugin"
+mkdir -p -- "${VALID_PACKAGE}/dist"
+printf '%s\n' '{"plugin":["valid-plugin"]}' >"${CONFIG_FILE}"
+printf '%s\n' '{"dependencies":{"valid-plugin":"1.0.0"}}' >"${VALID_WRAPPER}/package.json"
+printf '%s\n' '{"main":"dist/index.js"}' >"${VALID_PACKAGE}/package.json"
+printf '%s\n' 'export default {};' >"${VALID_PACKAGE}/dist/index.js"
+assert_reaches_bwrap \
+    'valid OpenCode plugin configuration reaches the main sandbox launch' \
+    opencode run -- "${TEST_PROJECT}" -q --no-host-tools --no-aws --no-clipboard --no-ssh-agent
+
+rm -f -- "${REAL_OPENCODE_MARKER}"
+DEVBOX_REAL_OPENCODE="${TEST_BIN}/opencode" \
+    DEVBOX_OPENCODE_INTEGRITY_HELPER="${INTEGRITY_HELPER}" \
+    OPENCODE_TEST_REAL_MARKER="${REAL_OPENCODE_MARKER}" \
+    HOME="${TEST_HOME}" XDG_CONFIG_HOME="${TEST_HOME}/.config" XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    "${OPENCODE_GUARD}" run
+[[ -e "${REAL_OPENCODE_MARKER}" ]] || {
+    printf 'FAIL: interactive-shell guard rejected valid plugins\n' >&2
+    exit 1
+}
+printf 'PASS: interactive-shell OpenCode guard permits valid normal launches\n'
+
+readonly LOCKED_HOME="${TEST_ROOT}/locked-home"
+readonly LOCKED_WRAPPER="${LOCKED_HOME}/.cache/opencode/packages/valid-plugin@latest"
+readonly LOCKED_PACKAGE="${LOCKED_WRAPPER}/node_modules/valid-plugin"
+mkdir -p -- "${LOCKED_HOME}/.config/opencode" "${LOCKED_HOME}/.pi/agent" "${LOCKED_PACKAGE}/dist"
+printf '{}\n' >"${LOCKED_HOME}/.pi/agent/settings.json"
+printf '%s\n' '{"plugin":["valid-plugin"]}' >"${LOCKED_HOME}/.config/opencode/opencode.json"
+printf '%s\n' '{"dependencies":{"valid-plugin":"1.0.0"}}' >"${LOCKED_WRAPPER}/package.json"
+printf '%s\n' '{"main":"dist/index.js"}' >"${LOCKED_PACKAGE}/package.json"
+printf '%s\n' 'export default {};' >"${LOCKED_PACKAGE}/dist/index.js"
+rm -f -- "${BWRAP_MARKER}"
+env -i HOME="${LOCKED_HOME}" USER="${USER:-developer}" LOGNAME="${LOGNAME:-${USER:-developer}}" \
+    PATH="${TEST_BIN}:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 \
+    DEVBOX_GIT="${TEST_BIN}/devbox-git" DEVBOX_FORCE_PROBE=1 DEVBOX_TEST_BWRAP_MARKER="${BWRAP_MARKER}" \
+    "${DEVBOX}" opencode run -- "${TEST_PROJECT}" -q --locked >/dev/null
+if [[ -e "${BWRAP_MARKER}" && ! -e "${LOCKED_HOME}/.cache/devbox" ]]; then
+    printf 'PASS: --locked validates OpenCode without persisting host integrity state\n'
+else
+    printf 'FAIL: --locked OpenCode preflight persisted state or did not launch\n' >&2
+    exit 1
+fi
+
+printf 'devbox OpenCode startup preflight tests passed\n'

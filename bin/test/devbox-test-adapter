@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+: "${DEVBOX_TEST_TARGET:?DEVBOX_TEST_TARGET is required}"
+
+before_separator=()
+after_separator=()
+raw_command=()
+seen_separator=0
+while [[ $# -gt 0 ]]; do
+    if [[ "${seen_separator}" -eq 0 ]]; then
+        if [[ "$1" == -- ]]; then
+            seen_separator=1
+        else
+            before_separator+=("$1")
+        fi
+        shift
+        continue
+    fi
+    if [[ "$1" == -x || "$1" == --exec ]]; then
+        shift
+        raw_command=("$@")
+        break
+    fi
+    after_separator+=("$1")
+    shift
+done
+
+if [[ ${#raw_command[@]} -gt 0 ]]; then
+    exec "${DEVBOX_TEST_TARGET}" "${raw_command[@]}" -- "${after_separator[@]}"
+fi
+if [[ ${#before_separator[@]} -gt 0 ]]; then
+    exec "${DEVBOX_TEST_TARGET}" pi "${before_separator[@]}" -- "${after_separator[@]}"
+fi
+exec "${DEVBOX_TEST_TARGET}" -- "${after_separator[@]}"
