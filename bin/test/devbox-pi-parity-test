@@ -2,6 +2,16 @@
 # shellcheck disable=SC2016 # Single-quoted probes expand only inside the sandbox.
 set -Eeuo pipefail
 
+# Environment-coupled escape hatch: the fixture launches real Pi through the
+# host pnpm shim, and multi-env pnpm stores (stale hashed dirs) can break the
+# in-box module resolution independently of the contract under test.
+# DEVBOX_SKIP_PI_PARITY=1 skips with an explicit marker; see
+# openspec/learnings/debt.md (pi-parity-fixture-store-drift).
+if [[ "${DEVBOX_SKIP_PI_PARITY:-0}" == "1" ]]; then
+    printf 'SKIP: devbox-pi-parity-test (DEVBOX_SKIP_PI_PARITY=1; pnpm store drift, see debt ledger)\n'
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 readonly DEVBOX="${SCRIPT_DIR}/../devbox"
