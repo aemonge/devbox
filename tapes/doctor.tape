@@ -8,6 +8,6 @@ Set Width 950
 Set Height 620
 Set Theme {"name": "Catppuccin Mocha"}
 
-Type "bin/devbox --doctor"
+Type "bin/devbox -- --doctor"
 Enter
 Sleep 3s

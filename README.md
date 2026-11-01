@@ -55,8 +55,8 @@ devbox -- ~/src/project             # zsh in the selected target
 devbox pi "fix this" -- ~/src/app   # Pi in the shared developer box
 devbox opencode -- ~/src/app -w     # OpenCode with browser developer mode
 devbox aws sts get-caller-identity  # AWS CLI with default AWS integration
-devbox --doctor                     # comprehensive diagnostics, no launch
-devbox --validate                   # validation suite, no launch
+devbox -- --doctor                  # comprehensive diagnostics, no launch
+devbox -- --validate                # validation suite, no launch
 ```
 
 Key options (see `devbox -- --help` for the full list):
