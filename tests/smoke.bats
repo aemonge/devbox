@@ -25,6 +25,23 @@ namespaces_available() {
     "${probe[@]}" >/dev/null 2>&1
 }
 
+bwrap_installed() {
+    command -v bwrap >/dev/null 2>&1
+}
+
+# Asserts the environment-appropriate --validate/--doctor refusal. In CI
+# (no bwrap) devbox reports the missing dependency; in a nested sandbox it
+# reports the namespace limit; both are honest refusals, matched exactly.
+assert_restricted_refusal() {
+    [ "$status" -eq 1 ]
+    if bwrap_installed; then
+        [[ "${output}" == *"cannot create the namespaces"* ]]
+        [[ "${output}" == *"normal host shell"* ]]
+    else
+        [[ "${output}" == *"bubblewrap (bwrap) not found in PATH"* ]]
+    fi
+}
+
 @test "--version reports program and backend" {
     run "${DEVBOX_SCRIPT}" --version
     [ "$status" -eq 0 ]
@@ -62,25 +79,22 @@ namespaces_available() {
 }
 
 @test "--validate matches real namespace capability" {
-    if namespaces_available; then
+    if bwrap_installed && namespaces_available; then
         run "${DEVBOX_SCRIPT}" --validate
         [ "$status" -eq 0 ]
     else
         run "${DEVBOX_SCRIPT}" --validate
-        [ "$status" -eq 1 ]
-        [[ "${output}" == *"cannot create the namespaces"* ]]
-        [[ "${output}" == *"normal host shell"* ]]
+        assert_restricted_refusal
     fi
 }
 
 @test "--doctor refuses honestly without namespaces" {
-    if namespaces_available; then
+    if bwrap_installed && namespaces_available; then
         # On a capable host --doctor inspects the real user environment
         # (OpenCode plugins, Pi state); that contract belongs to host-side
         # validation, not CI. Skip rather than fake it.
         skip "namespace-capable host: doctor depends on the real user environment"
     fi
     run "${DEVBOX_SCRIPT}" --doctor
-    [ "$status" -eq 1 ]
-    [[ "${output}" == *"cannot create the namespaces"* ]]
+    assert_restricted_refusal
 }

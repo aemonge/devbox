@@ -197,3 +197,11 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:49:56Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:50:20Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/tests/smoke.bats · at 2026-11-01T10:51:02Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:51:06Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/.github/workflows/ci.yml · at 2026-11-01T10:51:29Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:51:33Z
