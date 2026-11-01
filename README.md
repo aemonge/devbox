@@ -23,11 +23,21 @@ From a host terminal (not inside an existing devbox):
 
 ```sh
 git clone <this-repo> ~/usr/devbox   # or your preferred location
+cd ~/usr/devbox
+./install.sh                  # copy mode: bin/* -> ~/.local/bin
+./install.sh --symlink        # or symlink mode: points at the repository
+```
+
+Both modes check dependencies, install into `~/.local` (override with
+`--prefix DIR`), and verify with `devbox --version`. `~/.local/bin` must be
+on your `PATH`.
+
+Prefer doing it by hand? The symlink workflow is what `--symlink` does:
+
+```sh
 ln -sfn ~/usr/devbox/bin/devbox ~/.local/bin/devbox
 devbox --version
 ```
-
-`~/.local/bin` must be on your `PATH`.
 
 ## Usage
 

@@ -1,8 +1,8 @@
 # devbox repository gates — `just <recipe>`; `just check` before any commit.
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Every shell script in bin/ (the .md and .ts files are not shell).
-shell_scripts := "bin/devbox bin/devbox-git bin/devbox-opencode-guard bin/devbox-opencode-integrity bin/devbox-pi-guard"
+# Every shell script (bin/ plus the installer); .md and .ts are not shell.
+shell_scripts := "bin/devbox bin/devbox-git bin/devbox-opencode-guard bin/devbox-opencode-integrity bin/devbox-pi-guard install.sh"
 
 # default: run the full gate
 default: check
@@ -24,6 +24,14 @@ fmt-check:
 # lib/ module split — the monolith cannot be sourced without side effects)
 test:
     bats tests/
+
+# install into a prefix (default ~/.local; override with PREFIX=DIR)
+install:
+    ./install.sh --prefix "${PREFIX:-$HOME/.local}"
+
+# verify an existing install (override with PREFIX=DIR)
+verify:
+    "${PREFIX:-$HOME/.local}/bin/devbox" --version
 
 # aggregate gate
 check: lint fmt-check test

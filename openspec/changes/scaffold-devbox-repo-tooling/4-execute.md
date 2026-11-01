@@ -70,10 +70,16 @@
 
 ### Slice 4 — installer
 
-- [ ] install.sh (deps check, prefix install, symlink, verify) + just
-      install/verify
-      check: pending
-      paths: install.sh, justfile
+- [x] install.sh (deps check, prefix install, verify) + just install/verify
+      check: 7/7 installer bats tests green (copy mode, symlink mode, stale-
+      symlink replacement, arg validation, --version through the prefix);
+      install.sh itself is shellcheck- and shfmt-clean and included in the
+      lint/fmt gate lists; no ~/.local touched by tests (throwaway mktemp
+      prefixes)
+      interpretation note: plan said "prefix install of bin/ + symlink" —
+      implemented as two modes: copy (default, standalone) and --symlink
+      (the live host convention from the prior change's ledger); both verify
+      paths: install.sh, tests/install.bats, justfile, README.md, .gitignore
 - [ ] Commit `feat: add install script and just targets`
       hash: pending
 
@@ -173,3 +179,21 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:47:13Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T10:47:40Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/install.sh · at 2026-11-01T10:48:43Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/tests/install.bats · at 2026-11-01T10:49:07Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/justfile · at 2026-11-01T10:49:07Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:49:13Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:49:27Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/justfile · at 2026-11-01T10:49:52Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/README.md · at 2026-11-01T10:49:52Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:49:56Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T10:50:20Z
