@@ -421,3 +421,33 @@ run_devbox_validation's X-loop expects). Wiring and findings:
   gate-attributed · tool: bash · paths: — · at 2026-11-01T17:34:36Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T17:35:04Z
+
+  gate-attributed · tool: write · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:36:12Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:36:15Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:36:37Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:36:41Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:37:05Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:37:12Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:37:18Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:37:49Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:38:18Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:38:21Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:38:44Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:38:57Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T17:39:07Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:39:10Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T17:39:29Z

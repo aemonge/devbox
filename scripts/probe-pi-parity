@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# One-shot diagnostic for the pi-parity store-drift debt: reproduces the
+# devbox-pi-parity-test fixture invocation with a capturing bwrap shim and
+# prints every mount/env entry that touches pi, pnpm, or node — plus the
+# host-side pi resolution for comparison. Read-only except its own mktemp
+# root. Run on a capable host: scripts/probe-pi-parity
+
+set -Eeuo pipefail
+
+REPO_ROOT="$(cd -- "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+readonly REPO_ROOT
+readonly DEVBOX="${REPO_ROOT}/bin/devbox"
+
+PROBE_ROOT="$(mktemp -d)"
+trap 'rm -rf -- "${PROBE_ROOT}"' EXIT
+
+FIXTURE_HOME="${PROBE_ROOT}/home"
+FIXTURE_AGENT_REAL="${FIXTURE_HOME}/agent-real"
+FIXTURE_AGENT_LOGICAL="${FIXTURE_HOME}/.pi/agent"
+FIXTURE_PACKAGE="${PROBE_ROOT}/absolute-package"
+FIXTURE_PROJECT="${PROBE_ROOT}/project"
+
+mkdir -p -- \
+    "${FIXTURE_AGENT_REAL}/extensions" \
+    "${FIXTURE_AGENT_REAL}/npm" \
+    "${FIXTURE_PACKAGE}" \
+    "${FIXTURE_PROJECT}/.git" \
+    "${FIXTURE_HOME}/.pi" \
+    "${PROBE_ROOT}/bin" \
+    "${PROBE_ROOT}/runtime"
+ln -s -- "${FIXTURE_AGENT_REAL}" "${FIXTURE_AGENT_LOGICAL}"
+printf '{"packages":["%s"]}\n' "${FIXTURE_PACKAGE}" >"${FIXTURE_AGENT_REAL}/settings.json"
+printf '{"name":"absolute-fixture","pi":{"extensions":["./index.ts"]}}\n' >"${FIXTURE_PACKAGE}/package.json"
+printf 'export default function (pi) { pi.registerFlag("probe-package-loaded", { type: "boolean", default: false }); }\n' \
+    >"${FIXTURE_PACKAGE}/index.ts"
+
+# Capturing bwrap: records argv and exits without launching.
+cat >"${PROBE_ROOT}/bin/bwrap" <<'CAPTURE_SH'
+#!/usr/bin/env bash
+printf 'call from ppid=%s: argc=%s argv0=%s\n' "${PPID}" "$#" "${1:-<none>}" >>"${DEVBOX_PROBE_CAPTURE}.log"
+printf '%s\0' "$@" >"${DEVBOX_PROBE_CAPTURE}"
+CAPTURE_SH
+chmod +x "${PROBE_ROOT}/bin/bwrap"
+
+echo "== host-side pi resolution =="
+pi_path="$(command -v pi 2>/dev/null || true)"
+echo "command -v pi: ${pi_path:-<none>}"
+if [[ -n "${pi_path}" ]]; then
+    echo "file type: $(file -b "${pi_path}" 2>/dev/null || printf 'unknown')"
+    echo "realpath: $(realpath "${pi_path}" 2>/dev/null || printf 'unresolved')"
+    [[ -f "${pi_path}" ]] && sed -n '1,12p' "${pi_path}"
+fi
+echo "running session store: ${PNPM_HOME:-unknown} / pnpm global envs:"
+for env_dir in "${HOME}/.local/share/pnpm/global/v11"/*/; do
+    [[ -f "${env_dir}node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js" ]] &&
+        echo "  HAS cli.js: ${env_dir}"
+done
+
+echo
+echo "== fixture mount plan (pi/pnpm/node entries) =="
+env -i \
+    HOME="${FIXTURE_HOME}" USER="${USER:-developer}" LOGNAME="${USER:-developer}" \
+    XDG_CONFIG_HOME="${FIXTURE_HOME}/.config" XDG_DATA_HOME="${FIXTURE_HOME}/.local/share" \
+    XDG_STATE_HOME="${FIXTURE_HOME}/.local/state" XDG_CACHE_HOME="${FIXTURE_HOME}/.cache" \
+    XDG_RUNTIME_DIR="${PROBE_ROOT}/runtime" \
+    PI_CODING_AGENT_DIR="${FIXTURE_AGENT_LOGICAL}" \
+    PATH="${PROBE_ROOT}/bin:${PATH}" TERM=xterm-256color LANG=C.UTF-8 \
+    DEVBOX_FORCE_PROBE=1 DEVBOX_PROBE_CAPTURE="${PROBE_ROOT}/capture.bin" \
+    "${DEVBOX}" pi --help -- "${FIXTURE_PROJECT}" -q \
+    --no-host-tools --no-aws --no-clipboard --no-ssh-agent >/dev/null 2>&1 || true
+
+if [[ ! -s "${PROBE_ROOT}/capture.bin" ]]; then
+    echo "PROBE ERROR: no captured argv — devbox exited before bwrap assembly"
+    exit 1
+fi
+
+mapfile -d '' -t argv <"${PROBE_ROOT}/capture.bin"
+echo "captured argv elements: ${#argv[@]}"
+[[ -s "${PROBE_ROOT}/capture.bin.log" ]] && sed -n '1,6p' "${PROBE_ROOT}/capture.bin.log"
+if [[ "${#argv[@]}" -eq 0 ]]; then
+    echo "PROBE ERROR: capture is empty"
+    exit 1
+fi
+
+echo
+echo "== pi/pnpm/node-related argv entries =="
+for ((index = 0; index < ${#argv[@]}; index++)); do
+    entry="${argv[index]}"
+    case "${entry}" in
+    *pnpm* | *pi-coding* | */pi | *PI_CODING* | *devbox-pi-guard* | *node*)
+        printf 'argv[%s] %q\n' "${index}" "${entry}"
+        ;;
+    esac
+done
+
+echo
+echo "== PI_CODING_AGENT_DIR / pi binary neighborhoods =="
+for ((index = 0; index < ${#argv[@]}; index++)); do
+    entry="${argv[index]}"
+    if [[ "${entry}" == "PI_CODING_AGENT_DIR" || "${entry}" == *devbox-pi-guard* || "${entry}" == */pi ]]; then
+        end=$((index + 2))
+        ((end > ${#argv[@]} - 1)) && end=$((${#argv[@]} - 1))
+        printf 'argv[%s..%s]: ' "${index}" "${end}"
+        printf '%q ' "${argv[@]:$index:$((end - index + 1))}"
+        printf '\n'
+    fi
+done
