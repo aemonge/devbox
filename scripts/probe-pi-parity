@@ -17,7 +17,7 @@ trap 'rm -rf -- "${PROBE_ROOT}"' EXIT
 FIXTURE_HOME="${PROBE_ROOT}/home"
 FIXTURE_AGENT_REAL="${FIXTURE_HOME}/agent-real"
 FIXTURE_AGENT_LOGICAL="${FIXTURE_HOME}/.pi/agent"
-FIXTURE_PACKAGE="${PROBE_ROOT}/absolute-package"
+FIXTURE_PACKAGE="${FIXTURE_HOME}/projects/absolute-pi-package"
 FIXTURE_PROJECT="${PROBE_ROOT}/project"
 
 mkdir -p -- \

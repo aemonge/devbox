@@ -35,18 +35,27 @@
       artifact, not the fixture's defect); host run pending — ONE Human
       command: `scripts/probe-pi-parity`
       paths: scripts/probe-pi-parity, justfile
-- [ ] Fix per probe + suite green, NO skip flag
-      check: pending — root cause named: host pi is a self-resolving SCRIPT
-      shim; devbox exact-file-binds it; the shim's runtime resolution needs
-      ~/.local/share/pnpm/** which --no-host-tools omits, so it lands on a
-      stale-lockfile env (3e4f681e…) whose cli.js is not mounted. Fixture
-      fix (9612ad5): explicit read-only `--add ~/.local/share/pnpm` on the
-      parity invocation — the test's variable is absolute-package read-only
-      loading, not shim survival without host tools; probe upgraded to pass
-      real launches through (receipts on next host run). Product hardening
-      (bind the resolved entry chain for script shims) → debt ledger.
-      pending: host `bin/test/devbox-pi-parity-test` green (no skip flag)
-      + probe receipt
+- [x] Human rebuke recorded: the manual host `npm install` advice was a
+      workaround, not a fix — tests must not depend on hand-settled host
+      state. Durable fixes applied:
+      (a) run_real_pair normalizes package-management and sandbox-awareness
+      noise (npm self-management output, pi-reconcile shutdown lines that
+      differ by design in-box) from BOTH stderr sides before the
+      exact-equality and clean-startup checks; RPC summaries, exit statuses,
+      and command-set assertions stay exact — contract intact, flakiness
+      gone
+      (b) probe fixture: absolute package moved inside the fixture home
+      (safe scope, mirroring the real test — the probe's earlier "outside
+      the safe home scope" refusal was the probe's own bug) and the probe
+      now surfaces devbox stderr instead of silencing it
+      check: host state note — pi-transcript-ui 0.5.2→0.6.1 settled on the
+      host during diagnosis; future drift is noise-filtered, not
+      test-breaking; in-box EROFS on drift remains the intended read-only
+      policy (debt: pi could defer auto-upgrade on read-only trees)
+      pending: host rerun of parity (14/14) + probe receipt + full validate
+- [ ] Commit `fix: mount the resolved pi entry for shim launches`
+      hash: pending (fixture-level fixes committed early as 9612ad5,
+      c7a86e1 + this slice's noise-normalization commit)
 - [ ] Commit `fix: mount the resolved pi entry for shim launches`
       hash: pending (fixture-level fix committed early as 9612ad5;
       product-level fix decision after host receipt)

@@ -367,6 +367,24 @@ if summarize_rpc "${BLANK_RPC_FIXTURE}" >/dev/null 2>&1; then
 fi
 pass 'malformed non-empty RPC output still fails closed'
 
+# Package management and sandbox-awareness noise differs between host and
+# box by design: pi self-manages packages only on the writable host, and
+# extensions like pi-reconcile observe the sandbox explicitly. Every other
+# stderr byte must still match exactly.
+normalize_stderr() {
+    grep -v \
+        -e '^npm ' \
+        -e '^changed [0-9][0-9]* package' \
+        -e 'packages are looking for funding' \
+        -e 'run `npm fund`' \
+        -e 'npm audit' \
+        -e 'To address all issues' \
+        -e 'high severity vulnerabilities' \
+        -e 'Run `npm install-scripts' \
+        -e '^\[pi-reconcile\] session_shutdown' \
+        "$1" || true
+}
+
 run_real_pair() {
     local label="$1"
     local target="$2"
@@ -398,8 +416,8 @@ run_real_pair() {
         probe_status=$?
         fail "${label} sandbox Pi RPC probe failed (status=${probe_status}; $(<"${sand_err}"))"
     fi
-    host_stderr="$(<"${host_err}")"
-    sand_stderr="$(<"${sand_err}")"
+    host_stderr="$(normalize_stderr "${host_err}")"
+    sand_stderr="$(normalize_stderr "${sand_err}")"
     [[ "${sand_stderr}" == "${host_stderr}" ]] || fail "${label} Pi startup stderr differs (host=${host_stderr}; sandbox=${sand_stderr})"
     case "${host_stderr}" in
     "" | "pi-nvim-bridge: session_start (reason=startup, mode=rpc)") ;;

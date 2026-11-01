@@ -469,3 +469,11 @@ run_devbox_validation's X-loop expects). Wiring and findings:
   gate-attributed · tool: bash · paths: — · at 2026-11-01T18:28:27Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-01T18:28:59Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-pi-parity-test · at 2026-11-01T18:37:33Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/probe-pi-parity · at 2026-11-01T18:37:53Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T18:38:01Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-01T18:40:40Z
