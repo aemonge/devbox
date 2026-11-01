@@ -1,0 +1,11 @@
+# VHS renders (kept out of git; re-render with `just record`)
+tapes/out/
+*.gif
+
+# Test scratch
+tests/scratch/
+*.bats.log
+
+# Editor noise
+*.swp
+*~
