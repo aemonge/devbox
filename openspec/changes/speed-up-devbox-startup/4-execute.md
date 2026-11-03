@@ -204,6 +204,7 @@
 - [x] Final numbers (host, 2026-11-01): full startup 474.9ms ±13.7
       (baseline 622ms → −147ms, −24%); parse-only 18.8ms; namespace +
       capability cache hits healed (7ms + 21ms); fork census mkdir 72 → 10
+      (superseded by the quiet rerun below — see 435.9ms)
 - [x] README Performance section added (honest numbers, `just bench`
       pointer)
       paths: README.md
@@ -242,19 +243,28 @@
       the min 0.483s lands on the 474.9ms receipt and the phase trace
       (429ms pre-exec) agrees. Canonical wall number stays 474.9ms
       ±13.7 unless a quiet rerun produces a cleaner one
-- [ ] Human-only act: host `bin/devbox -- --validate` (full suite) ✅ +
-      `just bench` wall receipt (fresh run noisy — quiet rerun optional)
-      + verdict
-- [ ] Commit `docs: record startup optimization receipts`
-      hash: pending
+- [x] Quiet rerun receipt (host, 2026-11-03, machine idle): full startup
+      435.9ms ±4.8 (10 runs, 429.5–443.6) — cleaner than the 2026-11-01
+      receipt and −186ms (−30%) vs the 622ms baseline; parse-only
+      19.6ms ±0.9 (146 runs); phase trace 399ms pre-exec, the lowest
+      recorded. Canonical wall number is now 435.9ms ±4.8
+- [x] Human-only act: host `bin/devbox -- --validate` (full suite) 🎉
+      with no skip flag + clean `just bench` wall receipt + Human's
+      explicit close-on-rerun direction
+- [x] Commit `docs: record startup optimization receipts`
+      hash: this commit (the final docs close)
 
 ### Verification
 
-- pending — per slice: `just check`, argv snapshots, hyperfine receipts.
-- Human-only act (open): host `just bench` + full unskipped `--validate` +
-  verdict.
+- closed — per slice: `just check` green, argv snapshots, hyperfine
+  receipts in the ledger. Whole change: full unskipped host
+  `--validate` 🎉; clean wall 435.9ms ±4.8 vs 622ms baseline (−30%);
+  clean `git status`; modularize follow-up already recorded as the
+  sanctioned home for further tail reduction.
 
-- [ ] Human validation, response: pending
+- [x] Human validation: Human ran both host acts on the reference host,
+      selected the close-on-rerun path explicitly, and delivered the
+      clean receipt — change closed 2026-11-03.
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T13:28:32Z
 
@@ -297,3 +307,7 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-03T14:23:48Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T14:28:24Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/README.md · at 2026-11-03T14:54:04Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T14:54:08Z
