@@ -229,8 +229,14 @@
       tracing inflation plus accumulated stale-editor-runtime prune
       candidates, so shares not absolutes; hyperfine absent from PATH
       this run — wall receipt pending the rerun bench
-- [ ] Human-only act: host `bin/devbox -- --validate` (full suite) +
-      `just bench` + verdict
+- [x] Host RERUN receipt (2026-11-03, post-fix): 🎉 ALL validation tests
+      passed, no skip flag — pi-parity green incl. both real-Pi RPC pairs
+      against live Pi 1.0.4 / Node 26.10.0 (runtimes unchanged from host);
+      phase trace again 489ms pre-exec vs 432ms earlier same day —
+      run-to-run variance, both well under the 622ms baseline; hyperfine
+      still absent from PATH, timing sections honestly skipped twice
+- [ ] Human-only act: host `bin/devbox -- --validate` (full suite) ✅ +
+      `just bench` wall receipt (pending hyperfine) + verdict
 - [ ] Commit `docs: record startup optimization receipts`
       hash: pending
 
@@ -277,3 +283,5 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-03T13:42:42Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T13:42:50Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T14:19:31Z
