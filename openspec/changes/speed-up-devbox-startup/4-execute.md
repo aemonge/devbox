@@ -114,8 +114,8 @@
       lesson recorded: the mkdir was provisioning, not waste — the fork
       count was the only legitimate target
       paths: bin/devbox
-- [ ] Commit `fix: provision runtime cache dirs with one batched mkdir`
-      hash: pending
+- [x] Commit `fix: provision runtime cache dirs with one batched mkdir`
+      hash: 831dbaf
 - [x] Cache-poisoning bug found by the receipt and fixed: forced-probe runs
       (bench census, validation sub-invocations) skipped the cache READ but
       still WROTE the cache — dropping the namespace-ok stamp and taxing
