@@ -235,8 +235,16 @@
       phase trace again 489ms pre-exec vs 432ms earlier same day —
       run-to-run variance, both well under the 622ms baseline; hyperfine
       still absent from PATH, timing sections honestly skipped twice
+- [x] hyperfine returned (1.21.0, /usr/bin) and bench ran on host
+      (2026-11-03): parse-only 20.6ms ±1.4 over 138 runs — clean;
+      full startup 1.106s ±0.548 over 10 runs, range 0.483s…2.287s —
+      mean polluted by concurrent host load (σ 40× the 2026-11-01 run);
+      the min 0.483s lands on the 474.9ms receipt and the phase trace
+      (429ms pre-exec) agrees. Canonical wall number stays 474.9ms
+      ±13.7 unless a quiet rerun produces a cleaner one
 - [ ] Human-only act: host `bin/devbox -- --validate` (full suite) ✅ +
-      `just bench` wall receipt (pending hyperfine) + verdict
+      `just bench` wall receipt (fresh run noisy — quiet rerun optional)
+      + verdict
 - [ ] Commit `docs: record startup optimization receipts`
       hash: pending
 
@@ -285,3 +293,7 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-03T13:42:50Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T14:19:31Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T14:23:48Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T14:28:24Z
