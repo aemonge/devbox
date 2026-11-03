@@ -37,7 +37,9 @@ fi
 section "fork census (PS4, forced probe — fork structure, uncached discovery)"
 census_tmp="$(mktemp -d)"
 trap 'rm -rf -- "${census_tmp}"' EXIT
-PS4='+T ${EPOCHREALTIME} ' DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
+mkdir -p "${census_tmp}/home"
+# Isolated HOME: the census never reads or rewrites the real discovery cache.
+PS4='+T ${EPOCHREALTIME} ' HOME="${census_tmp}/home" DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
     >/dev/null 2>"${census_tmp}/trace.txt" || true
 python3 - "${census_tmp}/trace.txt" <<'PYEOF'
 import re

@@ -96,6 +96,20 @@
       launch (−41 forks); traced span 549ms → 445ms under tracing
       inflation; host millisecond receipt pending next `just bench`
 - [x] Commit `perf: stop materializing host runtime directories`
+      hash: 7895473
+- [x] HOST RECEIPT (Human, 2026-11-01): full startup 502.3ms ±8.9 (baseline
+      622ms → −120ms, −19%); parse-only 19.0ms; host-tool binds 178→100ms;
+      tail 262→208ms; fork census on host: mkdir 30, base64 18, chmod 9
+- [x] Cache-poisoning bug found by the receipt and fixed: forced-probe runs
+      (bench census, validation sub-invocations) skipped the cache READ but
+      still WROTE the cache — dropping the namespace-ok stamp and taxing
+      every real launch +52ms re-probe. Fix: write_discovery_cache returns
+      early under DEVBOX_FORCE_PROBE/DEVBOX_FORCE_DISCOVERY (symmetry with
+      the read skip); bench census additionally runs under an isolated HOME
+      so it can never touch the real cache either way
+      check: devbox-cache-test 6/6; `just check` green
+      paths: bin/devbox, scripts/bench
+- [ ] Commit `perf: stop forced-probe runs from poisoning the discovery cache`
       hash: pending
 
 ### Slice 3 — Pi state prep + discovery cache batching

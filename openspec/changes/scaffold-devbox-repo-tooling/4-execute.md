@@ -513,3 +513,13 @@ run_devbox_validation's X-loop expects). Wiring and findings:
   gate-attributed · tool: bash · paths: — · at 2026-11-03T07:42:20Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T07:42:56Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/devbox · at 2026-11-03T07:48:47Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/scripts/bench · at 2026-11-03T07:49:05Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:49:16Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:49:38Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:51:09Z

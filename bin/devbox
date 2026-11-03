@@ -269,6 +269,10 @@ write_discovery_cache() {
     [[ -n "${DEVBOX_DISCOVERY_CACHE:-}" ]] || return 0
     [[ "${EPHEMERAL_STATE:-0}" -eq 0 ]] || return 0
     command -v base64 >/dev/null 2>&1 || return 0
+    # Symmetry with the forced read skip: a forced-probe run (bench, census,
+    # validation) must never rewrite the host cache — it would drop the
+    # namespace-ok stamp and tax every real launch with a re-probe.
+    [[ "${DEVBOX_FORCE_PROBE:-0}" == "1" || "${DEVBOX_FORCE_DISCOVERY:-0}" == "1" ]] && return 0
     if discovery_cache_matches_read_snapshot; then
         return 0
     fi
