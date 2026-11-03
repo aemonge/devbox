@@ -35,11 +35,12 @@ if [[ "${DEVBOX_ACTIVE:-0}" == "1" ]]; then
 fi
 
 section "fork census (PS4, forced probe — fork structure, uncached discovery)"
+# No HOME isolation: the write-guard (bin/devbox write_discovery_cache)
+# already prevents forced-probe runs from poisoning the real cache, and an
+# isolated home would break Pi root validation mid-tail on hosts.
 census_tmp="$(mktemp -d)"
 trap 'rm -rf -- "${census_tmp}"' EXIT
-mkdir -p "${census_tmp}/home"
-# Isolated HOME: the census never reads or rewrites the real discovery cache.
-PS4='+T ${EPOCHREALTIME} ' HOME="${census_tmp}/home" DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
+PS4='+T ${EPOCHREALTIME} ' DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
     >/dev/null 2>"${census_tmp}/trace.txt" || true
 python3 - "${census_tmp}/trace.txt" <<'PYEOF'
 import re
@@ -83,7 +84,8 @@ for phase, pk in phase_forks.items():
     print(f"  [{phase}] {total} forks: {top}")
 PYEOF
 
-section "startup phase trace (real caches — nested boxes end at the namespace refusal)"
+section "startup phase trace (real caches — warm-up keeps this off the cold path)"
+"${DEVBOX}" /bin/true -- "${TARGET}" -q >/dev/null 2>&1 || true
 DEVBOX_TRACE_STARTUP=1 "${DEVBOX}" /bin/true -- "${TARGET}" -q 2>&1 || true
 
 if [[ "${nested}" == "yes" ]]; then
