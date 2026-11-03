@@ -30,7 +30,7 @@
       static suite green
       paths: bin/test/devbox-static-test
 - [x] Commit `feat: install devbox without cloning the repository`
-      hash: pending
+      hash: c7e0a10
 
 ### Slice 2 — README face
 
@@ -38,7 +38,7 @@
       (remote first, clone second); Showcase section embeds
       tapes/out/install.gif; logo.png now tracked so GitHub renders it
 - [x] Commit `docs: lead with the logo and the no-clone install`
-      hash: pending
+      hash: 1128227
 
 ### Slice 3 — showcase tape
 
@@ -47,7 +47,7 @@
       chafa, `devbox --version` + `--help`
       paths: tapes/install.tape
 - [x] Commit `docs: add the install showcase tape`
-      hash: pending
+      hash: a01dc26 (receipts commit: 64723bb)
 - [ ] Human-only act: render on the host (`vhs tapes/install.tape`),
       commit tapes/out/install.gif, then `just check` + push + verdict
 
@@ -58,3 +58,5 @@
 - Human-only (open): host render + GIF commit + `just check` + push.
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T15:27:36Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T15:28:11Z
