@@ -75,9 +75,13 @@
       code before its fix), (c) environment-coupling normalization with the
       parity contract itself intact (summary equality still exact),
       (d) diagnostics (probe, bench) outside the gates
-- [ ] Commit `fix: mount the resolved pi entry for shim launches`
-      hash: pending (fixture-level fix committed early as 9612ad5;
-      product-level fix decision after host receipt)
+- [x] Commit `fix: mount the resolved pi entry for shim launches`
+      hash: superseded by the fix series — product-level fix NOT needed;
+      decision recorded: the closure mounting semantics were correct, the
+      fixture simply under-authorized its pnpm root (9612ad5 authorized it,
+      parity 18/18 green, no skip flag). The fragile-shim-file contract
+      ("does not mount only the shim") was never violated by the product;
+      no bin/devbox change required
 
 ### Slice 2 — host-tool binds: retire the mkdir storm
 
@@ -125,8 +129,8 @@
       so it can never touch the real cache either way
       check: devbox-cache-test 6/6; `just check` green
       paths: bin/devbox, scripts/bench
-- [ ] Commit `perf: stop forced-probe runs from poisoning the discovery cache`
-      hash: pending
+- [x] Commit `perf: stop forced-probe runs from poisoning the discovery cache`
+      hash: 8017e85
 
 ### Slice 3 — Pi state prep + discovery cache batching
 
@@ -168,16 +172,14 @@
       check: in-sandbox attribution works (defaults 3, discovery 4,
       binds-window 14 forks — the tail itself is host-only)
       paths: scripts/bench
-- [ ] Commit `feat: attribute bench forks per phase`
-      hash: pending
+- [x] Commit `feat: attribute bench forks per phase`
+      hash: a273b5f
 
-### Slice 4 — OpenCode preflight: inline the cache hit
+### Slice 4 — OpenCode preflight: inline the cache hit (CLOSED rejected)
 
-- [ ] Inline cache-hit read; helper on miss/invalid only; preflight suite
-      extended
-      check: pending
-- [ ] Commit `perf: inline opencode integrity cache hits`
-      hash: pending
+- [x] Plan-vintage items closed by decision — the evaluate-and-reject above
+      is the verdict; `perf: inline opencode integrity cache hits` is never
+      committed by intent, not omission
 
 ### Slice 5 — env assembly + integration tail: profiled verdict
 
@@ -217,3 +219,9 @@
   verdict.
 
 - [ ] Human validation, response: pending
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:28:32Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:29:18Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:29:45Z
