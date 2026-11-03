@@ -53,9 +53,28 @@
       test-breaking; in-box EROFS on drift remains the intended read-only
       policy (debt: pi could defer auto-upgrade on read-only trees)
       pending: host rerun of parity (14/14) + probe receipt + full validate
-- [ ] Commit `fix: mount the resolved pi entry for shim launches`
-      hash: pending (fixture-level fixes committed early as 9612ad5,
-      c7a86e1 + this slice's noise-normalization commit)
+- [x] Suite green, NO skip flag — HOST RECEIPTS 2026-11-01: parity 18/18
+      (incl. both real-Pi RPC pairs, Fancy Footer parity, runtime hash
+      parity), full `bin/devbox -- --validate` 🎉 with every suite green
+      (live, extended, static, parser, git-policy, integrity, preflight,
+      pi-state, agent-context, cache, pty, git-identity, skills-symlink)
+- [x] Slice-1 commits (declared name evolved into a fix series, recorded
+      honestly): 9612ad5 `fix: authorize the pnpm root in the pi-parity
+      fixture` · c7a86e1 `test: surface devbox errors in the pi-parity
+      probe` · 7f80f49 `fix: normalize environment noise in pi parity
+      stderr checks` · 1e4b034 `fix: decouple pi parity assertions from
+      host focus state`
+- [x] Assurance receipts (Human-requested): whitespace-ignored diff of
+      bin/devbox vs pre-session baseline 600a084 shows ONLY the 0.1.0→0.2.0
+      usage doc string, the skills-symlink X-loop wiring, and reviewed
+      shfmt line-structure classes; all four guard scripts have ZERO
+      changed lines; every test change classified as (a) new coverage
+      (32 bats + adopted ~1,100-assertion suite + skills wiring),
+      (b) stale-assertion alignment to already-validated policy (yield rule
+      bbbcf44, nvim overlay gate — each was failing against the current
+      code before its fix), (c) environment-coupling normalization with the
+      parity contract itself intact (summary equality still exact),
+      (d) diagnostics (probe, bench) outside the gates
 - [ ] Commit `fix: mount the resolved pi entry for shim launches`
       hash: pending (fixture-level fix committed early as 9612ad5;
       product-level fix decision after host receipt)
