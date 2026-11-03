@@ -48,14 +48,19 @@
       paths: tapes/install.tape
 - [x] Commit `docs: add the install showcase tape`
       hash: a01dc26 (receipts commit: 64723bb)
-- [ ] Human-only act: render on the host (`vhs tapes/install.tape`),
-      commit tapes/out/install.gif, then `just check` + push + verdict
+- [x] Host render receipt (2026-11-03): vhs parser dialect fixed (no
+      escaped quotes in Type), theme palette resolved explicitly after
+      the named-theme lookup left fillborders empty (all three tapes
+      fixed, c78a7f4); install.gif rendered 700K and committed past the
+      render-artifact ignore rules as the explicit showcase exception
+      (tapes/out is otherwise house-ignored; re-render with just record)
 
 ### Verification
 
 - In-box: bash -n / shellcheck / shfmt -i 4 green; static suite green
   with the new assertions; repo-mode + remote-mode install smokes green.
-- Human-only (open): host render + GIF commit + `just check` + push.
+- Host render green (install.gif committed); open: Human `just check`,
+  push (⇡ so the raw one-liner serves the logo + tarball), verdict.
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T15:27:36Z
 
@@ -76,3 +81,7 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-03T15:35:10Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T15:35:17Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T15:39:22Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T15:39:29Z
