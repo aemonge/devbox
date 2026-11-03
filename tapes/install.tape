@@ -8,9 +8,9 @@ Set Theme {"name": "Catppuccin Mocha"}
 
 Type "export DEMO_HOME=/tmp/devbox-demo-install"
 Enter
-Type "rm -rf -- \"$DEMO_HOME\" && mkdir -p -- \"$DEMO_HOME\""
+Type "rm -rf -- $DEMO_HOME && mkdir -p -- $DEMO_HOME"
 Enter
-Type "export HOME=\"$DEMO_HOME\""
+Type "export HOME=$DEMO_HOME"
 Enter
 Sleep 300ms
 
@@ -22,14 +22,14 @@ Type "clear"
 Enter
 Sleep 400ms
 
-Type "\"$DEMO_HOME/.local/bin/devbox\" --version"
+Type "$DEMO_HOME/.local/bin/devbox --version"
 Enter
 Sleep 1200ms
 
-Type "\"$DEMO_HOME/.local/bin/devbox\" --help"
+Type "$DEMO_HOME/.local/bin/devbox --help"
 Enter
 Sleep 2200ms
 
-Type "chafa \"$DEMO_HOME/.local/share/devbox/logo.png\" 2>/dev/null || echo \"logo at $DEMO_HOME/.local/share/devbox/logo.png\""
+Type "chafa $DEMO_HOME/.local/share/devbox/logo.png 2>/dev/null || echo logo at $DEMO_HOME/.local/share/devbox/logo.png"
 Enter
 Sleep 2200ms
