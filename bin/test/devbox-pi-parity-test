@@ -430,11 +430,17 @@ run_real_pair() {
 import json
 import sys
 summary = json.loads(sys.argv[1])
-required = {"work", "openspec-focus", "galactica-status", "galactica-status-refresh", "next-loop"}
+# Devbox-owned invariants: the tool-registry probe command exists exactly
+# once and no extension command or tool is registered twice in-box. The
+# presence of `work`/`work_focus` depends on the target project's OpenSpec
+# focus state — host environment, not devbox parity — so it is capped, not
+# required. Parity itself is the sandbox == host summary equality asserted
+# in bash above.
+required = {"devbox-pi-tool-registry"}
 assert required <= set(summary["commands"]), summary
-assert summary["commands"].count("work") == 1, summary
+assert summary["commands"].count("devbox-pi-tool-registry") == 1, summary
 assert summary["duplicates"] == [], summary
-assert summary["work_focus_count"] == 1, summary
+assert summary["work_focus_count"] <= 1, summary
 # The sandbox state is environment-forwarded (provider/model/thinking come
 # from the caller's Pi selection), so no hardcoded provider triplet is
 # asserted here; parity of the forwarding itself is covered by comparing
