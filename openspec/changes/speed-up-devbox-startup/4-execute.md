@@ -130,6 +130,29 @@
       remaining are intentional creations), base64 → 0 in forced runs, chmod
       9 → 6, traced span 445ms → 354ms
 - [x] Commit `perf: batch pi state preparation and cache io forks`
+      hash: eef804f
+
+### Slice 4 — OpenCode preflight: evaluate-and-reject (recorded)
+
+- [x] Measured: the helper spawn taxes only `devbox opencode …` launches
+      (~20ms each), not every launch — run_opencode_plugin_preflight
+      returns 0 for all other commands
+      check: inlining the fingerprint logic would duplicate security-
+      critical code with silent-divergence risk against the 46-test
+      integrity suite; a background-and-wait pattern complicates the
+      critical path for a subset-of-launches win. Rejected with receipts —
+      revisit only if opencode launch latency becomes a measured complaint
+      paths: none (decision record)
+
+### Slice 4b — bench per-phase fork attribution (Slice 5 instrument)
+
+- [x] scripts/bench census now attributes fork classes to phase windows
+      (trace_startup labels), so the host run names the 208ms tail's
+      offenders directly
+      check: in-sandbox attribution works (defaults 3, discovery 4,
+      binds-window 14 forks — the tail itself is host-only)
+      paths: scripts/bench
+- [ ] Commit `feat: attribute bench forks per phase`
       hash: pending
 
 ### Slice 4 — OpenCode preflight: inline the cache hit

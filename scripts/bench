@@ -51,9 +51,10 @@ external = (
     "command -v", "find ", "sort ", "bwrap ", "ssh ", "git ", "tee ",
 )
 counts = {}
+phase = "(pre-phase)"
+phase_forks = {}
 total_lines = 0
 first_t = last_t = None
-prev_t = None
 for raw in open(sys.argv[1], errors="replace"):
     m = re.match(r"^\+T ([0-9.]+) (.*)", raw)
     if not m:
@@ -63,13 +64,23 @@ for raw in open(sys.argv[1], errors="replace"):
     content = m.group(2)
     first_t = first_t if first_t is not None else t
     last_t = t
+    label = re.search(r"trace_startup '([^']+)'", content)
+    if label:
+        phase = label.group(1)
     for token in external:
         if content.startswith(token) or f"$( {token.strip()}" in content:
             counts[token.strip()] = counts.get(token.strip(), 0) + 1
+            phase_forks.setdefault(phase, {}).setdefault(token.strip(), 0)
+            phase_forks[phase][token.strip()] += 1
             break
 print(f"trace lines: {total_lines}, span: {(last_t - first_t) * 1000:.0f}ms (inflated by tracing)")
 for name, count in sorted(counts.items(), key=lambda kv: -kv[1])[:15]:
     print(f"  {count:4d}x  {name}")
+print("per-phase fork attribution:")
+for phase, pk in phase_forks.items():
+    total = sum(pk.values())
+    top = ", ".join(f"{v}x {k}" for k, v in sorted(pk.items(), key=lambda kv: -kv[1])[:6])
+    print(f"  [{phase}] {total} forks: {top}")
 PYEOF
 
 section "startup phase trace (real caches — nested boxes end at the namespace refusal)"
