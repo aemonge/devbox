@@ -95,11 +95,27 @@
 - [x] Fork receipt (in-sandbox census, forced probe): mkdir 72 → 31 per
       launch (−41 forks); traced span 549ms → 445ms under tracing
       inflation; host millisecond receipt pending next `just bench`
-- [x] Commit `perf: stop materializing host runtime directories`
-      hash: 7895473
 - [x] HOST RECEIPT (Human, 2026-11-01): full startup 502.3ms ±8.9 (baseline
       622ms → −120ms, −19%); parse-only 19.0ms; host-tool binds 178→100ms;
       tail 262→208ms; fork census on host: mkdir 30, base64 18, chmod 9
+- [x] Commit `perf: stop materializing host runtime directories`
+      hash: 7895473 — SUPERSEDED in part: see the regression entry below
+      (skip-if-absent was wrong for provisioned tool state; batched
+      provisioning keeps the fork win and the feature)
+- [x] REGRESSION CAUGHT BY HOST VALIDATION (D.1b) and fixed: skip-if-absent
+      broke a documented feature — runtime subpaths are PROVISIONED writable
+      tool-cache state (live test D.1b "devbox-parity host tool state is
+      writable"); a fresh fixture home must get its ~/.cache/uv created and
+      bound. Fix: bind_runtime_dir restored to create-on-demand; the
+      27-subpath loop now provisions absent dirs in ONE batched mkdir then
+      binds in original loop order (identical argv, 27 mkdir forks → 1)
+      check: parser 195/195, static 138/138, `just check` green; pending:
+      host D.1b green on next validate
+      lesson recorded: the mkdir was provisioning, not waste — the fork
+      count was the only legitimate target
+      paths: bin/devbox
+- [ ] Commit `fix: provision runtime cache dirs with one batched mkdir`
+      hash: pending
 - [x] Cache-poisoning bug found by the receipt and fixed: forced-probe runs
       (bench census, validation sub-invocations) skipped the cache READ but
       still WROTE the cache — dropping the namespace-ok stamp and taxing
@@ -179,7 +195,7 @@
       change (per-module measurement with unit tests), not micro-edits
       paths: bin/devbox
 - [x] Commit `perf: batch stale runtime pruning`
-      hash: pending
+      hash: 898542e
 
 ### Slice 6 — receipts and close
 

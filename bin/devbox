@@ -430,12 +430,11 @@ bind_runtime_dir() {
     local host_p="$1"
     local sand_p="$2"
 
-    # Bind only directories that already exist on the host. Creating missing
-    # host directories just to mount them empty mutates the host on every
-    # launch and costs one fork per subpath; absent paths are skipped.
-    if [[ ! -d "${host_p}" ]]; then
-        return 0
-    fi
+    # Host tool state is provisioned on demand: a missing directory is
+    # created so the box gets a persistent writable cache home (live test
+    # D.1b). Callers that bind many paths batch the mkdirs themselves
+    # (one fork total) via bind_runtime_dir_precreated.
+    mkdir -p -- "${host_p}"
     bind_runtime_dir_precreated "${host_p}" "${sand_p}"
 }
 
@@ -3506,8 +3505,17 @@ if [[ "${ALLOW_HOST_TOOLS}" -eq 1 ]]; then
         ".nuget/packages" ".gem" ".bundle" ".cache/bundle"
         ".composer" ".cache/composer"
     )
+    # Provision absent tool-cache directories in ONE batched mkdir, then
+    # bind each in loop order — same argv as per-dir mkdir, 27x fewer forks.
+    missing_runtime_dirs=()
     for runtime_subpath in "${HOST_RUNTIME_BIND_SUBPATHS[@]}"; do
-        bind_runtime_dir "${HOST_HOME}/${runtime_subpath}" "${SANDBOX_HOME}/${runtime_subpath}"
+        [[ -d "${HOST_HOME}/${runtime_subpath}" ]] || missing_runtime_dirs+=("${HOST_HOME}/${runtime_subpath}")
+    done
+    if [[ "${#missing_runtime_dirs[@]}" -gt 0 ]]; then
+        mkdir -p -- "${missing_runtime_dirs[@]}"
+    fi
+    for runtime_subpath in "${HOST_RUNTIME_BIND_SUBPATHS[@]}"; do
+        bind_runtime_dir_precreated "${HOST_HOME}/${runtime_subpath}" "${SANDBOX_HOME}/${runtime_subpath}"
     done
 
     if [[ -d "${HOST_HOME}/.pyenv" ]]; then
