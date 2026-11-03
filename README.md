@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="devbox logo" width="180">
+</p>
+
 # devbox
 
 Mount-isolated developer box using [Bubblewrap](https://github.com/containers/bubblewrap).
@@ -19,7 +23,17 @@ clipboard, terminal sockets — under one explicit policy.
 
 ## Install
 
-From a host terminal (not inside an existing devbox):
+No clone required — a Linux host with `bwrap`, `git`, and `curl` or `wget`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aemonge/devbox/main/install.sh | bash
+```
+
+The one-liner fetches the main tarball, installs `bin/*` into `~/.local`,
+saves the logo to `~/.local/share/devbox/`, and verifies with
+`devbox --version`.
+
+From a clone instead (host terminal, not inside an existing devbox):
 
 ```sh
 git clone <this-repo> ~/usr/devbox   # or your preferred location
@@ -115,6 +129,13 @@ policy validation and integration closure, ~74ms environment construction,
 ~27ms bwrap exec. The remaining cost is the price of the adversarial policy
 validation — the same logic the ~700-assertion suite enforces. Measure with
 `just bench` (hyperfine, phase trace, fork census, hot-line report).
+
+## Showcase
+
+Install and first launch, recorded with VHS (`just record` renders
+host-side):
+
+![devbox install showcase](tapes/out/install.gif)
 
 ## Development
 
