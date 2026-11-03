@@ -207,6 +207,28 @@
 - [x] README Performance section added (honest numbers, `just bench`
       pointer)
       paths: README.md
+- [x] Host validate receipt (2026-11-03): every suite green — live,
+      extended, static, parser, integrity, preflight, pi-state,
+      agent-context, cache, pty, git-identity, git-policy,
+      skills-symlink — D.1b provisioning receipt settled; pi-parity
+      FAILED: summarize_rpc crashed json.loads on a non-JSON stdout line
+      check: in-box reproduction of the host rpc probe isolated the
+      offender — `[pi-reconcile] session_shutdown reason=quit` on rpc
+      stdout, new since the green 2026-11-01 run (host extension drift);
+      the stderr side was already filtered by normalize_stderr
+- [x] Fix: summarize_rpc tolerates the exact-prefix reconcile diagnostic
+      (mirrors the stderr filter); fixture extended with the line;
+      shipped block verified — fixture summary byte-exact, malformed
+      output still fails closed, real-shaped output parses;
+      shellcheck + shfmt -i 4 clean
+      paths: bin/test/devbox-pi-parity-test
+- [x] Phase trace receipt (2026-11-03, real caches): 432ms pre-exec
+      (discovery 19 · capability 16 · namespace 6 · tool discovery 21 ·
+      host tool binds 88 · runtime/GUI/SSH/project binds 200 · argv
+      build 82); census traced 13,811 lines vs 7,438 at slice 0 —
+      tracing inflation plus accumulated stale-editor-runtime prune
+      candidates, so shares not absolutes; hyperfine absent from PATH
+      this run — wall receipt pending the rerun bench
 - [ ] Human-only act: host `bin/devbox -- --validate` (full suite) +
       `just bench` + verdict
 - [ ] Commit `docs: record startup optimization receipts`
@@ -225,3 +247,29 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-03T13:29:18Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T13:29:45Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:29:53Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:37:15Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:37:25Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/test/devbox-pi-parity-test · at 2026-11-03T13:39:07Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:39:14Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:39:25Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:40:01Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:40:20Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:40:46Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:41:05Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:41:23Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:41:44Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T13:42:26Z

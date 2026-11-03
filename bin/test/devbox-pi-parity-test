@@ -321,9 +321,11 @@ commands = None
 state = None
 tools = None
 allowed_diagnostic = "pi-nvim-bridge: session_start (reason=startup, mode=rpc)"
+# pi-reconcile writes its shutdown diagnostic to rpc stdout (the stderr
+# side is already filtered in normalize_stderr); it carries no parity data.
 for raw in open(sys.argv[1], encoding="utf-8"):
     line = raw.strip()
-    if not line or line == allowed_diagnostic:
+    if not line or line == allowed_diagnostic or line.startswith("[pi-reconcile] session_shutdown "):
         continue
     event = json.loads(raw)
     if event.get("command") == "get_commands":
@@ -356,11 +358,12 @@ pi-nvim-bridge: session_start (reason=startup, mode=rpc)
 
 {"command":"get_state","data":{"model":{"provider":"provider","id":"model"},"thinkingLevel":"high"}}
 {"type":"extension_ui_request","message":"DEVBOX_TOOLS:[\"work_focus\"]"}
+[pi-reconcile] session_shutdown reason=quit
 JSONL
 blank_rpc_summary="$(summarize_rpc "${BLANK_RPC_FIXTURE}")"
 [[ "${blank_rpc_summary}" == '{"commands": ["work"], "duplicates": [], "state": ["provider", "model", "high"], "work_focus_count": 1}' ]] ||
     fail "blank RPC framing-line fixture was summarized incorrectly (${blank_rpc_summary})"
-pass 'blank and known bridge diagnostic RPC framing lines are ignored during parity summarization'
+pass 'blank and known bridge/reconcile diagnostic RPC framing lines are ignored during parity summarization'
 printf 'not-json\n' >"${BLANK_RPC_FIXTURE}"
 if summarize_rpc "${BLANK_RPC_FIXTURE}" >/dev/null 2>&1; then
     fail 'malformed non-empty RPC output was accepted'
