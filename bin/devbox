@@ -953,20 +953,24 @@ prepare_pi_writable_state() {
     # never created, copied, or rewritten here.
     (
         umask 077
-        mkdir -p -- "${PI_AGENT_STATE_SOURCE_ROOT}"
+        local -a state_dirs=("${PI_AGENT_STATE_SOURCE_ROOT}")
+        local resource_path
+        local resource_source
         for resource_path in "${PI_AGENT_STATE_SUBDIRS[@]}"; do
             resource_source="${PI_AGENT_STATE_SOURCE_ROOT}/${resource_path}"
             if [[ "${resource_path}" == sessions ]]; then
                 resource_source="${PI_AGENT_SESSION_SOURCE_DIR}"
             fi
-            mkdir -p -- "${resource_source}"
+            state_dirs+=("${resource_source}")
         done
+        mkdir -p -- "${state_dirs[@]}"
     )
     seed_independent_pi_git_cache || exit 1
     if [[ "${PI_AGENT_STATE_IS_INDEPENDENT}" -eq 1 ]]; then
-        chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}"
+        chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}" "${PI_AGENT_STATE_SOURCE_ROOT}/trust"
+    else
+        chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust"
     fi
-    chmod 0700 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust"
     if [[ -f "${PI_AGENT_STATE_SOURCE_ROOT}/trust.json" ]]; then
         chmod 0600 -- "${PI_AGENT_STATE_SOURCE_ROOT}/trust.json"
     fi

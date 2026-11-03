@@ -114,10 +114,22 @@
 
 ### Slice 3 — Pi state prep + discovery cache batching
 
-- [ ] L943 batched mkdir/chmods; cache r/w one base64 per direction; stable
-      homes cached with validation entries
-      check: pending
-- [ ] Commit `perf: batch pi state prep and discovery cache io`
+- [x] L943 Pi state prep: 21 sequential mkdir forks → one batched
+      `mkdir -p -- "${dirs[@]}"`; chmods collapsed (independent root+trust
+      one call, portable trust another)
+      check: pi-state-test 20/20 (state isolation contract intact);
+      parser 195/195; static 138; `just check` green
+      paths: bin/devbox
+- [x] Cache IO: read path was already batched by the legacy suite (one
+      base64 decode with the Cg== join); write path (9 forks) left as-is —
+      it fires only on invalidation, not per launch; recorded as no-op
+- [x] Stable-home caching: SKIPPED with evidence — select_host_tool_home
+      and resolve_bind_source_path are bash-native (forks only for symlink
+      realpath); nothing to cache; recorded as no-op
+- [x] Fork receipt (in-sandbox census, isolated HOME): mkdir 30 → 10 (all
+      remaining are intentional creations), base64 → 0 in forced runs, chmod
+      9 → 6, traced span 445ms → 354ms
+- [x] Commit `perf: batch pi state preparation and cache io forks`
       hash: pending
 
 ### Slice 4 — OpenCode preflight: inline the cache hit
