@@ -163,18 +163,34 @@
 - [ ] Commit `perf: inline opencode integrity cache hits`
       hash: pending
 
-### Slice 5 — env assembly + integration tail defork
+### Slice 5 — env assembly + integration tail: profiled verdict
 
-- [ ] Host census assigns the 262ms/78ms shares; top offenders deforked
-      check: pending
-- [ ] Commit `perf: defork environment assembly and integrations`
+- [x] Host profile receipt (Human, 166cf07): tail = 186ms with ONE fork —
+      the remaining tail cost is bash interpreter work (thousands of
+      validation operations across the Pi closure and integrations), not
+      forks; hot-lines named one safe offender: the stale editor-runtime
+      prune paid id/stat/process_start_time/rm forks PER candidate
+      check: prune hoisted `id -u` (once per launch, not per candidate),
+      stale removals batched into one `rm -rf`; "stale editor runtime is
+      pruned after its exact creating process exits" still green (parser
+      195/195); `just check` green
+      verdict recorded: remaining tail cost is the price of adversarial
+      policy validation — further reduction belongs to the modularize
+      change (per-module measurement with unit tests), not micro-edits
+      paths: bin/devbox
+- [x] Commit `perf: batch stale runtime pruning`
       hash: pending
 
 ### Slice 6 — receipts and close
 
-- [ ] Final bench vs baseline in ledger; README perf paragraph; full
-      unskipped host --validate green
-      check: pending
+- [x] Final numbers (host, 2026-11-01): full startup 474.9ms ±13.7
+      (baseline 622ms → −147ms, −24%); parse-only 18.8ms; namespace +
+      capability cache hits healed (7ms + 21ms); fork census mkdir 72 → 10
+- [x] README Performance section added (honest numbers, `just bench`
+      pointer)
+      paths: README.md
+- [ ] Human-only act: host `bin/devbox -- --validate` (full suite) +
+      `just bench` + verdict
 - [ ] Commit `docs: record startup optimization receipts`
       hash: pending
 

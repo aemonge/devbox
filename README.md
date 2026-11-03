@@ -107,6 +107,15 @@ explanation. The wrapper's denials are authoritative — do not bypass them.
 | `bin/devbox-pi-title.ts` | Pi title extension |
 | `bin/devbox-agent-context.md` | Read-only agent guidance mounted into every box |
 
+## Performance
+
+Startup measures ~475ms wall on the reference host (baseline 622ms): ~20ms
+bash parse, ~50ms cache-and-discovery, ~122ms mount assembly, ~186ms policy
+validation and integration closure, ~80ms environment construction, ~27ms
+bwrap exec. The remaining cost is the price of the adversarial policy
+validation — the same logic the ~700-assertion suite enforces. Measure with
+`just bench` (hyperfine, phase trace, fork census, hot-line report).
+
 ## Development
 
 The repository gates itself with [`just`](https://github.com/casey/just):

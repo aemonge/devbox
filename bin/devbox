@@ -1857,15 +1857,19 @@ prune_stale_editor_runtimes() {
     local current_started
     local remainder
     local had_nullglob=0
+    local uid
     local -a candidates=()
+    local -a stale_candidates=()
 
     shopt -q nullglob && had_nullglob=1
     shopt -s nullglob
     candidates=("${runtime_base}"/run.*.*.*)
     ((had_nullglob)) || shopt -u nullglob
+    [[ "${#candidates[@]}" -gt 0 ]] || return 0
+    uid="$(id -u)"
     for candidate in "${candidates[@]}"; do
         [[ -d "${candidate}" && ! -L "${candidate}" ]] || continue
-        [[ "$(stat -c %u -- "${candidate}" 2>/dev/null || true)" == "$(id -u)" ]] || continue
+        [[ "$(stat -c %u -- "${candidate}" 2>/dev/null || true)" == "${uid}" ]] || continue
         name="${candidate##*/}"
         remainder="${name#run.}"
         pid="${remainder%%.*}"
@@ -1874,8 +1878,10 @@ prune_stale_editor_runtimes() {
         [[ "${pid}" =~ ^[0-9]+$ && "${started}" =~ ^[0-9]+$ ]] || continue
         current_started="$(process_start_time "${pid}")"
         [[ -n "${current_started}" && "${current_started}" == "${started}" ]] && continue
-        rm -rf -- "${candidate}"
+        stale_candidates+=("${candidate}")
     done
+    [[ "${#stale_candidates[@]}" -gt 0 ]] && rm -rf -- "${stale_candidates[@]}"
+    return 0
 }
 
 prepare_nvim_editor_runtime() {
