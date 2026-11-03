@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- No-clone install: `install.sh` fetches the main tarball automatically
+  when piped (`curl ... | bash`) or with `--remote`; the logo persists to
+  `PREFIX/share/devbox/` and renders best-effort via `chafa`/kitty `icat`.
 - Repository scaffolding: README, LICENSE, CHANGELOG, editor/ignore rules.
 - `just` gates: `lint` (shellcheck), `fmt`/`fmt-check` (shfmt), `test` (bats
   syntax + smoke suites), aggregate `check`.

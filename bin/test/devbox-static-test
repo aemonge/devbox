@@ -7,6 +7,12 @@ readonly DEVBOX="${SCRIPT_DIR}/../devbox"
 readonly DEVBOX_GIT="${SCRIPT_DIR}/../devbox-git"
 readonly DEVBOX_PI_GUARD="${SCRIPT_DIR}/../devbox-pi-guard"
 readonly DEVBOX_AGENT_CONTEXT="${SCRIPT_DIR}/../devbox-agent-context.md"
+readonly INSTALLER="${SCRIPT_DIR}/../../install.sh"
+
+[[ -r "${INSTALLER}" ]] || {
+    printf 'FAIL: installer missing: %s\n' "${INSTALLER}" >&2
+    exit 1
+}
 
 [[ -x "${DEVBOX}" ]] || {
     printf 'FAIL: devbox executable missing: %s\n' "${DEVBOX}" >&2
@@ -44,6 +50,17 @@ assert_absent() {
         exit 1
     fi
     printf 'PASS: %s\n' "${description}"
+}
+
+assert_installer_contains() {
+    local description="$1"
+    local text="$2"
+    if grep -F -q -- "${text}" "${INSTALLER}"; then
+        printf 'PASS: %s\n' "${description}"
+    else
+        printf 'FAIL: %s (missing %s)\n' "${description}" "${text}" >&2
+        exit 1
+    fi
 }
 
 assert_contains 'identifies the unified command' 'readonly PROGRAM_NAME="devbox"'
@@ -184,5 +201,15 @@ assert_contains 'uses a disposable temporary root' '--tmpfs /tmp'
 assert_contains 'clears inherited environment' '--clearenv'
 assert_contains 'dies with its parent' '--die-with-parent'
 assert_absent 'does not bind the entire host home writable' '--bind "${HOST_HOME}" "${SANDBOX_HOME}"'
+
+assert_installer_contains 'installs without a repository clone via the main tarball' 'https://github.com/aemonge/devbox/archive/refs/heads/main.tar.gz'
+assert_installer_contains 'detects piped invocations as remote installs' 'the installer is not a file on'
+assert_installer_contains 'fetches the tarball with curl when available' 'curl -fsSL "${REMOTE_TARBALL_URL}"'
+assert_installer_contains 'falls back to wget for the tarball fetch' 'wget -qO- "${REMOTE_TARBALL_URL}"'
+assert_installer_contains 'refuses symlink mode for remote installs' '--symlink needs a repository checkout'
+assert_installer_contains 'cleans the remote staging dir on exit' 'rm -rf -- "${STAGING_DIR}"'
+assert_installer_contains 'persists the logo into the shared prefix' 'share/devbox'
+assert_installer_contains 'prefers chafa for logo display' 'command -v chafa'
+assert_installer_contains 'keeps logo display best-effort' 'logo saved to'
 
 printf 'devbox static policy tests passed\n'
