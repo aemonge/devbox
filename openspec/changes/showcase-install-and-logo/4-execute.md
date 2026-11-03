@@ -66,3 +66,13 @@
   gate-attributed · tool: bash · paths: — · at 2026-11-03T15:30:14Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T15:30:20Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/tapes/install.tape · at 2026-11-03T15:35:06Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/tapes/intro.tape · at 2026-11-03T15:35:06Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/tapes/doctor.tape · at 2026-11-03T15:35:06Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T15:35:10Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T15:35:17Z
