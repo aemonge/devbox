@@ -487,3 +487,29 @@ run_devbox_validation's X-loop expects). Wiring and findings:
   gate-attributed · tool: bash · paths: — · at 2026-11-03T07:24:34Z
 
   gate-attributed · tool: bash · paths: — · at 2026-11-03T07:25:20Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/devbox · at 2026-11-03T07:34:20Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:34:26Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:36:18Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:36:43Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/devbox · at 2026-11-03T07:38:08Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/devbox · at 2026-11-03T07:38:28Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:38:36Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:39:07Z
+
+  gate-attributed · tool: edit · paths: /home/aemonge/projects/devbox/bin/devbox · at 2026-11-03T07:39:34Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:39:40Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:40:24Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:42:20Z
+
+  gate-attributed · tool: bash · paths: — · at 2026-11-03T07:42:56Z

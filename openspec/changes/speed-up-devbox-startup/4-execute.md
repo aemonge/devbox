@@ -81,11 +81,21 @@
 
 ### Slice 2 — host-tool binds: retire the mkdir storm
 
-- [ ] L429 guard replaces host mkdir; argv delta snapshot-tested
-      check: pending
-- [ ] hyperfine receipt for the 178ms block
-      check: pending
-- [ ] Commit `perf: stop materializing host runtime directories`
+- [x] L429 guard replaces host mkdir; absent dirs skipped, never
+      materialized
+      check: `bind_runtime_dir` now returns 0 for absent host dirs; the
+      snapshot discipline surfaced TWO feature-required creation sites that
+      implicit mkdir was silently carrying — OpenCode config/data/state/
+      cache and the devbox opencode integrity-cache dir — now explicit via
+      `bind_runtime_dir_created` (deliberate host mkdir, 5 forks, feature
+      persistence preserved); parser 195/195 after each step; static 138,
+      integrity 46, preflight 10, skills 19, agent-context 12, cache 6,
+      git-identity 3, git-policy green; `just check` green
+      paths: bin/devbox
+- [x] Fork receipt (in-sandbox census, forced probe): mkdir 72 → 31 per
+      launch (−41 forks); traced span 549ms → 445ms under tracing
+      inflation; host millisecond receipt pending next `just bench`
+- [x] Commit `perf: stop materializing host runtime directories`
       hash: pending
 
 ### Slice 3 — Pi state prep + discovery cache batching

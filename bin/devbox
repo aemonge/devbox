@@ -426,6 +426,21 @@ bind_runtime_dir() {
     local host_p="$1"
     local sand_p="$2"
 
+    # Bind only directories that already exist on the host. Creating missing
+    # host directories just to mount them empty mutates the host on every
+    # launch and costs one fork per subpath; absent paths are skipped.
+    if [[ ! -d "${host_p}" ]]; then
+        return 0
+    fi
+    bind_runtime_dir_precreated "${host_p}" "${sand_p}"
+}
+
+# Feature-required persistence directories (OpenCode state, caches): create
+# them on the host deliberately so the box shares them from the first run.
+bind_runtime_dir_created() {
+    local host_p="$1"
+    local sand_p="$2"
+
     mkdir -p -- "${host_p}"
     bind_runtime_dir_precreated "${host_p}" "${sand_p}"
 }
@@ -2318,18 +2333,18 @@ bind_opencode_state() {
         return 0
     fi
 
-    bind_runtime_dir "${host_opencode_config}" "${SANDBOX_HOME}/.config/opencode"
+    bind_runtime_dir_created "${host_opencode_config}" "${SANDBOX_HOME}/.config/opencode"
     if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
         bind_runtime_dir "${host_openspec_config}" "${sandbox_openspec_config}"
     else
         info "OpenSpec state: preserving the project-specific read-only mount"
     fi
-    bind_runtime_dir "${host_opencode_data}" "${SANDBOX_HOME}/.local/share/opencode"
+    bind_runtime_dir_created "${host_opencode_data}" "${SANDBOX_HOME}/.local/share/opencode"
     # The Neovim editor bridge hands files to the host server through this
     # shared state path; a sandbox-only path is invisible to the host Neovim.
-    bind_runtime_dir "${host_opencode_state}" "${SANDBOX_HOME}/.local/state/opencode"
-    bind_runtime_dir "${host_opencode_cache}" "${SANDBOX_HOME}/.cache/opencode"
-    bind_runtime_dir "${host_cache_root}/devbox/opencode" "${SANDBOX_HOME}/.cache/devbox/opencode"
+    bind_runtime_dir_created "${host_opencode_state}" "${SANDBOX_HOME}/.local/state/opencode"
+    bind_runtime_dir_created "${host_opencode_cache}" "${SANDBOX_HOME}/.cache/opencode"
+    bind_runtime_dir_created "${host_cache_root}/devbox/opencode" "${SANDBOX_HOME}/.cache/devbox/opencode"
     bind_runtime_dir "${HOST_HOME}/.opencode" "${SANDBOX_HOME}/.opencode"
     bind_runtime_dir "${HOST_HOME}/.agents" "${SANDBOX_HOME}/.agents"
     bind_runtime_dir "${HOST_HOME}/.bun" "${SANDBOX_HOME}/.bun"
