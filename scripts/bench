@@ -40,7 +40,8 @@ section "fork census (PS4, forced probe — fork structure, uncached discovery)"
 # isolated home would break Pi root validation mid-tail on hosts.
 census_tmp="$(mktemp -d)"
 trap 'rm -rf -- "${census_tmp}"' EXIT
-PS4='+T ${EPOCHREALTIME} ' DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
+# LINENO in PS4 lets the hot-lines report attribute traced time to source lines.
+PS4='+T ${EPOCHREALTIME} ${LINENO}: ' DEVBOX_FORCE_PROBE=1 bash -x "${DEVBOX}" /bin/true -- "${TARGET}" -q \
     >/dev/null 2>"${census_tmp}/trace.txt" || true
 python3 - "${census_tmp}/trace.txt" <<'PYEOF'
 import re
@@ -82,6 +83,25 @@ for phase, pk in phase_forks.items():
     total = sum(pk.values())
     top = ", ".join(f"{v}x {k}" for k, v in sorted(pk.items(), key=lambda kv: -kv[1])[:6])
     print(f"  [{phase}] {total} forks: {top}")
+
+# Hot-lines report: biggest traced-time gaps attributed to the preceding
+# source line. Tracing inflates absolute values ~5-10x; relative shares
+# still identify interpreter-hot functions reliably.
+gaps = []
+prev_t = None
+prev_line = None
+for raw in open(sys.argv[1], errors="replace"):
+    m = re.match(r"^\+T ([0-9.]+) (\d+): (.*)", raw)
+    if not m:
+        continue
+    t = float(m.group(1))
+    if prev_t is not None:
+        gaps.append(((t - prev_t) * 1000, prev_line, prev_content[:90]))
+    prev_t, prev_line, prev_content = t, int(m.group(2)), m.group(3)
+gaps.sort(reverse=True)
+print("hot lines (traced-ms, inflated — compare shares, not absolutes):")
+for d, lineno, content in gaps[:12]:
+    print(f"  {d:7.1f}ms L{lineno}: {content}")
 PYEOF
 
 section "startup phase trace (real caches — warm-up keeps this off the cold path)"
