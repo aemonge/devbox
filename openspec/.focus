@@ -1,0 +1,6 @@
+# one active change per room — eospec writes, verbs refresh
+change: worktree-gitfile-mount
+artifact-name: 4-execute.md
+artifact-idx: 4/5
+task: 9/9
+next-step: eospec approve
