@@ -3734,6 +3734,25 @@ for added_path in "${ADD_RW_PATHS[@]}"; do
     add_custom_bind --bind "${added_path}"
 done
 
+# Linked worktrees carry their git metadata outside the target. Mount the
+# resolved chain at its own canonical paths so the gitfile's pointer stays
+# true inside the box, with the same writability the target's own .git
+# receives — writable by default, sealed under read-only modes.
+if [[ -n "${WORKTREE_GITDIR}" ]] && ! is_path_within "${PROJECT_SOURCE_DIR}" "${WORKTREE_GITDIR}"; then
+    if [[ "${FS_MODE}" == "ro" ]]; then
+        WORKTREE_BIND_FLAG="--ro-bind"
+        WORKTREE_CHAIN_POLICY="read-only"
+    else
+        WORKTREE_BIND_FLAG="--bind"
+        WORKTREE_CHAIN_POLICY="writable"
+    fi
+    if [[ "${WORKTREE_GIT_COMMON}" != "${WORKTREE_GITDIR}" ]]; then
+        add_prepared_bind_once "${WORKTREE_BIND_FLAG}" "${WORKTREE_GIT_COMMON}" "${WORKTREE_GIT_COMMON}"
+    fi
+    add_prepared_bind_once "${WORKTREE_BIND_FLAG}" "${WORKTREE_GITDIR}" "${WORKTREE_GITDIR}"
+    info "Worktree git chain: ${WORKTREE_CHAIN_POLICY}"
+fi
+
 # Skills homes can contain symlinked children (articles -> ~/articles) whose
 # targets exist only on the host. Bind each resolved target read-only at its
 # own canonical path so the links resolve naturally inside the sandbox. Running

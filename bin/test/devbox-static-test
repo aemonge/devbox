@@ -212,4 +212,13 @@ assert_installer_contains 'persists the logo into the shared prefix' 'share/devb
 assert_installer_contains 'prefers chafa for logo display' 'command -v chafa'
 assert_installer_contains 'keeps logo display best-effort' 'logo saved to'
 
+assert_contains 'resolves linked-worktree gitfile chains at startup' 'resolve_worktree_git_chain "${PROJECT_SOURCE_DIR}"'
+assert_contains 'names the linked-worktree chain when it lives outside the mount' 'Linked worktree: gitdir '
+assert_contains 'mounts the worktree common dir with target policy' 'add_prepared_bind_once "${WORKTREE_BIND_FLAG}" "${WORKTREE_GIT_COMMON}" "${WORKTREE_GIT_COMMON}"'
+assert_contains 'mounts the worktree gitdir with target policy' 'add_prepared_bind_once "${WORKTREE_BIND_FLAG}" "${WORKTREE_GITDIR}" "${WORKTREE_GITDIR}"'
+assert_contains 'keeps the worktree chain writable by default' 'WORKTREE_BIND_FLAG="--bind"'
+assert_contains 'seals the worktree chain under read-only modes' 'WORKTREE_BIND_FLAG="--ro-bind"'
+assert_contains 'skips the redundant common-dir bind for submodule gitfiles' '[[ "${WORKTREE_GIT_COMMON}" != "${WORKTREE_GITDIR}" ]]'
+assert_contains 'reports the worktree chain mount policy' 'Worktree git chain: '
+
 printf 'devbox static policy tests passed\n'
