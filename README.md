@@ -96,6 +96,12 @@ host-tool caches, AWS, clipboard, SSH, terminal, and optional GUI integrations
 share one developer box; other Pi configuration stays read-only unless
 `--allow-pi-config` is explicit.
 
+A linked worktree target mounts its git metadata transparently: the `.git`
+gitfile points at the worktree gitdir, and its `commondir` names the main
+repository's `.git`. Devbox resolves the chain at startup and mounts both
+paths with the same policy the target's own `.git` receives — writable by
+default, read-only under `--ro` and `--locked`.
+
 ## Security scope
 
 Defaults favor development convenience: network, AWS credentials, and
@@ -108,6 +114,10 @@ Inside the box, `git` is transparently backed by the `devbox-git` policy
 wrapper: normal local work passes, while network Git operations, history
 rewriting, destructive cleanup, and configuration escapes are denied with an
 explanation. The wrapper's denials are authoritative — do not bypass them.
+Linked-worktree targets additionally mount their outside gitdir chain
+(worktree gitdir + main `.git`) with the target's own `.git` policy, so
+in-box commits write to the main repository's object store by default;
+`--locked` seals the chain.
 
 ## What's in the box
 
