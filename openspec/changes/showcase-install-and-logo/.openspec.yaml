@@ -12,3 +12,8 @@ granted_brainstorm: 2026-11-03T15:18:02Z
 granted_investigate: 2026-11-03T15:22:08Z
 
 granted_plan: 2026-11-03T15:24:40Z
+
+x-granted: brainstorm,investigate
+x-granted_brainstorm: 2026-11-16T09:19:07Z
+
+x-granted_investigate: 2026-11-16T11:47:26Z
