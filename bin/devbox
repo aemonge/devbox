@@ -1428,6 +1428,50 @@ find_repository_root() {
     return 1
 }
 
+# Linked worktrees keep their git metadata outside the target: the .git
+# gitfile names the worktree gitdir, and the gitdir's commondir file names
+# the shared main .git. Resolve both so the box can mount the chain under
+# the target's own .git policy.
+resolve_worktree_git_chain() {
+    local target_root="$1"
+    local git_path="${target_root}/.git"
+    local first_line gitdir commondir_file commondir
+
+    WORKTREE_GITDIR=""
+    WORKTREE_GIT_COMMON=""
+
+    [[ "${TARGET_KIND}" == "dir" ]] || return 0
+    [[ -f "${git_path}" ]] || return 0
+
+    first_line="$(head -n 1 "${git_path}" 2>/dev/null)" || return 0
+    case "${first_line}" in
+    gitdir:*)
+        gitdir="${first_line#gitdir: }"
+        ;;
+    *)
+        return 0
+        ;;
+    esac
+    [[ -n "${gitdir}" ]] || return 0
+
+    if [[ "${gitdir}" != /* ]]; then
+        gitdir="${target_root}/${gitdir}"
+    fi
+    WORKTREE_GITDIR="$(realpath -m "${gitdir}")" || return 0
+
+    commondir_file="${WORKTREE_GITDIR}/commondir"
+    if [[ -f "${commondir_file}" ]]; then
+        commondir="$(head -n 1 "${commondir_file}" 2>/dev/null)" || return 0
+        if [[ "${commondir}" != /* ]]; then
+            commondir="${WORKTREE_GITDIR}/${commondir}"
+        fi
+        WORKTREE_GIT_COMMON="$(realpath -m "${commondir}")" || return 0
+    else
+        # Submodule gitfiles point at a self-contained module gitdir.
+        WORKTREE_GIT_COMMON="${WORKTREE_GITDIR}"
+    fi
+}
+
 is_explicit_rw_path_covering() {
     local candidate="$1"
     local configured_path
@@ -3451,6 +3495,11 @@ else
     SANDBOX_WORKDIR="${INVOCATION_CWD}"
 fi
 cargo_workspace_expand_target
+
+resolve_worktree_git_chain "${PROJECT_SOURCE_DIR}"
+if [[ -n "${WORKTREE_GITDIR}" ]] && ! is_path_within "${PROJECT_SOURCE_DIR}" "${WORKTREE_GITDIR}"; then
+    info "Linked worktree: gitdir ${WORKTREE_GITDIR} · common dir ${WORKTREE_GIT_COMMON}"
+fi
 
 SANDBOX_HOME="${HOST_HOME}"
 SANDBOX_LOCAL_DIR="${SANDBOX_HOME}/.local"
