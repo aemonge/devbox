@@ -89,7 +89,7 @@ mkdir -p -- \
     "${SYMLINK_SOURCE_CONFIG}/nvim" "${SYMLINK_PROJECT_OPENSPEC}/changes/parser-validation" \
     "${TEST_HOME}/.local/share/opencode" "${TEST_HOME}/.cache/opencode" \
     "${TEST_HOME}/.opencode" "${TEST_HOME}/.agents" "${TEST_HOME}/.bun" \
-    "${TEST_HOME}/.aws/sso/cache" "${TEST_HOME}/.aws/cli/cache" \
+    "${TEST_HOME}/.pi-lens" "${TEST_HOME}/.aws/sso/cache" "${TEST_HOME}/.aws/cli/cache" \
     "${EXTERNAL_PNPM_HOME}/bin" "$(dirname "${EXTERNAL_PI_TARGET}")" "$(dirname "${EXTERNAL_PI_STORE_TARGET}")" \
     "${UNSAFE_PNPM_HOME}/bin" "$(dirname "${UNSAFE_PI_TARGET}")" "${UNSAFE_PNPM_HOME}/store" \
     "${RUNTIME_DIR}" /tmp/.X11-unix
@@ -107,6 +107,8 @@ printf '{"pi":{"extensions":[]}}\n' >"${IN_TREE_ABSOLUTE_PI_PACKAGE}/package.jso
 ln -s "${ABSOLUTE_PI_PACKAGE}" "${ABSOLUTE_PI_PACKAGE_ALIAS}"
 printf '#!/usr/bin/env bash\n' >"${TEST_HOME}/.pi/agent/scripts/helper"
 printf '{"existing":{"type":"api_key","key":"fixture"}}\n' >"${TEST_HOME}/.pi/agent/auth.json"
+printf '{"agentName":"Gigi"}\n' >"${TEST_HOME}/.pi/agent/pi-ramonas-voice.settings.json"
+printf 'lens-config\n' >"${TEST_HOME}/.pi-lens/config.json"
 printf 'vim.g.devbox_fixture_config = true\n' >"${LINKED_NVIM_INIT}"
 ln -s "${LINKED_NVIM_INIT}" "${TEST_HOME}/.config/nvim/init.lua"
 printf '{}\n' >"${TEST_HOME}/.config/nvim/lazy-lock.json"
@@ -564,6 +566,9 @@ assert_sequence_contains 'Pi agent root is disposable' --tmpfs "${TEST_HOME}/.pi
 assert_sequence_contains 'Pi settings remain read-only' --ro-bind "${TEST_HOME}/.pi/agent/settings.json" "${TEST_HOME}/.pi/agent/settings.json"
 assert_sequence_contains 'existing Pi credentials are mounted writable and persistent' --bind "${TEST_HOME}/.pi/agent/auth.json" "${TEST_HOME}/.pi/agent/auth.json"
 assert_sequence_absent 'existing Pi credentials are not overlaid read-only' --ro-bind "${TEST_HOME}/.pi/agent/auth.json" "${TEST_HOME}/.pi/agent/auth.json"
+assert_sequence_contains 'unclaimed plugin root settings are mounted read-only' --ro-bind "${TEST_HOME}/.pi/agent/pi-ramonas-voice.settings.json" "${TEST_HOME}/.pi/agent/pi-ramonas-voice.settings.json"
+assert_sequence_contains 'pi-lens plugin home is mounted writable and persistent' --bind "${TEST_HOME}/.pi-lens" "${TEST_HOME}/.pi-lens"
+assert_sequence_contains 'jiti transform cache is shared writable from the host tmpdir' --bind "${TMPDIR:-/tmp}/jiti" "$(get_setenv_value TMPDIR)/jiti"
 assert_sequence_contains 'symlink-backed Pi agents are resolved and mounted read-only' --ro-bind "${LINKED_PI_AGENTS}" "${TEST_HOME}/.pi/agent/agents"
 assert_sequence_contains 'symlink-backed Pi Taskflows are resolved and mounted read-only' --ro-bind "${LINKED_PI_TASKFLOWS}" "${TEST_HOME}/.pi/agent/taskflows"
 assert_sequence_contains 'user OpenSpec schemas are mounted read-only at the canonical XDG destination' --ro-bind "${TEST_HOME}/.local/share/openspec/schemas" "${TEST_HOME}/.local/share/openspec/schemas"

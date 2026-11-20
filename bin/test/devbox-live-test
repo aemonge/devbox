@@ -135,6 +135,7 @@ run_validation() {
         "${test_home}/.local/state/private-data" \
         "${custom_xdg_state_home}" \
         "${test_home}/.cache/pi" \
+        "${test_home}/.pi-lens" \
         "${test_home}/.agents/skills/example" \
         "${test_home}/.local/bin" \
         "${test_home}/.ssh/ssh-keys/personal" \
@@ -172,6 +173,8 @@ run_validation() {
     ln -s "${linked_pi_taskflows}" "${linked_resource_home}/.pi/agent/taskflows"
     printf 'original-pi-config\n' >"${test_home}/.pi/config"
     printf '{"theme":"original"}\n' >"${test_home}/.pi/agent/settings.json"
+    printf '{"agentName":"Gigi"}\n' >"${test_home}/.pi/agent/pi-ramonas-voice.settings.json"
+    printf 'lens-config\n' >"${test_home}/.pi-lens/config.json"
     printf '{"trusted":false}\n' >"${test_home}/.pi/agent/trust.json"
     printf '{"devboxSentinel":"fancy-footer"}\n' >"${pi_root_config_source_dir}/fancy-footer.json"
     printf '{"devboxSentinel":"galactica-status"}\n' >"${pi_root_config_source_dir}/galactica-status.json"
@@ -654,6 +657,28 @@ PY
             validation_fail "Test E.12 FAIL: Pi XDG state/cache dirs were not writable (${output})"
             failed_tests=$((failed_tests + 1))
         fi
+
+        # shellcheck disable=SC2016 # $HOME must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'cat "$HOME/.pi/agent/pi-ramonas-voice.settings.json" >/dev/null || exit 1; if printf bad > "$HOME/.pi/agent/pi-ramonas-voice.settings.json" 2>/dev/null; then printf PLUGIN_SETTINGS_WRITE_ALLOWED; else printf PLUGIN_SETTINGS_RO; fi; printf lens-ok > "$HOME/.pi-lens/status" || exit 1; printf PI_PLUGIN_RESOURCES_OK' 2>&1 || true)"
+        if [[ "${output}" == *PI_PLUGIN_RESOURCES_OK* ]] && [[ "${output}" == *PLUGIN_SETTINGS_RO* ]] &&
+            [[ "$(<"${test_home}/.pi-lens/status")" == 'lens-ok' ]] &&
+            [[ "$(<"${test_home}/.pi/agent/pi-ramonas-voice.settings.json")" == '{"agentName":"Gigi"}' ]]; then
+            validation_pass 'Test E.15 PASS: plugin root settings stay read-only while the pi-lens home persists writable state'
+        else
+            validation_fail "Test E.15 FAIL: plugin settings visibility or pi-lens persistence failed (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+
+        # shellcheck disable=SC2016 # $TMPDIR must expand inside the sandboxed shell.
+        output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'printf %s jiti-warm > "$TMPDIR/jiti/devbox-jiti-probe" || exit 1; printf PI_JITI_CACHE_OK' 2>&1 || true)"
+        if [[ "${output}" == *PI_JITI_CACHE_OK* ]] &&
+            [[ "$(<"${TMPDIR:-/tmp}/jiti/devbox-jiti-probe")" == 'jiti-warm' ]]; then
+            validation_pass 'Test E.16 PASS: jiti transform cache is shared writable with the host tmpdir'
+        else
+            validation_fail "Test E.16 FAIL: jiti transform cache was not shared or writable (${output})"
+            failed_tests=$((failed_tests + 1))
+        fi
+        rm -f -- "${TMPDIR:-/tmp}/jiti/devbox-jiti-probe"
 
         # shellcheck disable=SC2016 # XDG_STATE_HOME expands inside the sandboxed shell.
         output="$(run_validation_devbox -- "${test_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'install -d -m 0700 "$XDG_STATE_HOME/ramona" "$XDG_STATE_HOME/ramona/checkpoints" "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation" || exit 1; umask 077; printf %s ramona-checkpoint-v1 > "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation/checkpoint" || exit 1; chmod 0600 "$XDG_STATE_HOME/ramona/checkpoints/devbox-validation/checkpoint" || exit 1; test ! -e "$XDG_STATE_HOME/private-data/hidden.txt" || exit 1; printf RAMONA_WRITE_OK' 2>&1 || true)"

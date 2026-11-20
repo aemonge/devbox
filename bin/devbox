@@ -495,6 +495,7 @@ bind_pi_xdg_resources() {
     local host_state_ramona="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}/ramona"
     local host_state_cockpit="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}/pi-vimux-starship"
     local host_cache_pi="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}/pi"
+    local host_pi_lens="${HOST_HOME}/.pi-lens"
     local sand_config_pi="${SANDBOX_CONFIG_DIR}/pi"
     local sand_data_pi="${SANDBOX_LOCAL_SHARE_DIR}/pi"
     local sand_state_pi="${SANDBOX_LOCAL_STATE_DIR}/pi"
@@ -531,6 +532,16 @@ bind_pi_xdg_resources() {
         chmod 0700 -- "${host_state_cockpit}"
         bind_runtime_dir_precreated "${host_state_cockpit}" "${sand_state_cockpit}"
         bind_runtime_dir "${host_cache_pi}" "${sand_cache_pi}"
+        # pi-lens plugin home: config, probe caches, warmed LSP tools, and
+        # logs share one directory; without this bind every box launch pays
+        # a cold plugin start and loses plugin settings.
+        if [[ -d "${host_pi_lens}" ]]; then
+            bind_runtime_dir_precreated "${host_pi_lens}" "${host_pi_lens}"
+        fi
+        # jiti transform cache: pi's TS extension packages resolve their
+        # cache to $TMPDIR/jiti, and the box TMPDIR is per-run, so without
+        # this bind every launch re-transpiles the extension surface.
+        bind_runtime_dir "${TMPDIR:-/tmp}/jiti" "${DEVBOX_TMPDIR}/jiti"
     fi
 }
 
@@ -1012,6 +1023,47 @@ bind_pi_writable_state() {
     fi
 }
 
+bind_pi_agent_unclaimed_entries() {
+    local entry_path entry_name resolved_target
+    local had_nullglob=0
+    local had_dotglob=0
+    local -a entries=()
+    local -A claimed_entries=()
+
+    # Plugin root files appear without a devbox release (the next plugin's
+    # pi-*.settings.json). Any root-level entry the curated policy does not
+    # claim mounts read-only, so plugin configuration survives the box
+    # boundary instead of vanishing into the assembled tmpfs.
+    for entry_name in "${PI_AGENT_STATE_SUBDIRS[@]}" "${PI_AGENT_RO_PATHS[@]}" \
+        "${PI_AGENT_ROOT_CONFIG_FILES[@]}" "${PI_AGENT_CREDENTIAL_FILES[@]}"; do
+        claimed_entries["${entry_name}"]=1
+    done
+    claimed_entries["trust.json"]=1
+
+    [[ -d "${PI_AGENT_DIR}" ]] || return 0
+    shopt -q nullglob && had_nullglob=1
+    shopt -q dotglob && had_dotglob=1
+    shopt -s nullglob dotglob
+    entries=("${PI_AGENT_DIR}"/*)
+    ((had_nullglob)) || shopt -u nullglob
+    ((had_dotglob)) || shopt -u dotglob
+
+    for entry_path in "${entries[@]}"; do
+        entry_name="$(basename -- "${entry_path}")"
+        [[ -n "${claimed_entries[${entry_name}]:-}" ]] && continue
+        # Automatic exposure stays read-only and inside HOME: unknown
+        # entries are configuration until a curated policy claims them.
+        if [[ -L "${entry_path}" ]]; then
+            resolved_target="$(realpath -- "${entry_path}" 2>/dev/null || true)"
+            if [[ -z "${resolved_target}" ]] || ! is_path_within "${HOST_HOME}" "${resolved_target}"; then
+                warning "Skipping Pi agent entry whose target escapes HOME: ${entry_path}"
+                continue
+            fi
+        fi
+        bind_pi_agent_entry --ro-bind "${entry_name}"
+    done
+}
+
 assemble_pi_agent_resource_closure() {
     local resource_path
 
@@ -1051,6 +1103,7 @@ assemble_pi_agent_resource_closure() {
         for resource_path in "${PI_AGENT_ROOT_CONFIG_FILES[@]}"; do
             bind_pi_agent_entry --ro-bind "${resource_path}"
         done
+        bind_pi_agent_unclaimed_entries
         # Credentials are mutable runtime state: Pi refreshes OAuth tokens in place.
         # Exact file binds preserve existing credentials without granting writes
         # to settings, packages, trust, or the rest of the portable Pi root.
