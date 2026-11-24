@@ -634,7 +634,7 @@ assert_bind_destination_absent 'missing Neovim lockfiles do not create file moun
 printf '{}\n' >"${TEST_HOME}/.config/nvim/lazy-lock.json"
 
 run_devbox pi -- "${SYMLINK_LOGICAL_TARGET}" -q
-assert_sequence_contains 'project OpenSpec takes read-only precedence over writable global OpenSpec state' --ro-bind "${SYMLINK_PROJECT_OPENSPEC}" "${TEST_HOME}/.config/openspec"
+assert_sequence_absent 'global XDG OpenSpec root is never mounted, even from a symlinked config tree' --ro-bind "${SYMLINK_PROJECT_OPENSPEC}" "${TEST_HOME}/.config/openspec"
 assert_sequence_absent 'writable global OpenSpec state cannot override project-specific OpenSpec' --bind "${TEST_HOME}/.config/openspec" "${TEST_HOME}/.config/openspec"
 assert_no_conflicting_bind_destinations 'symlinked project OpenSpec mount plan has no conflicting destination'
 

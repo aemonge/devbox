@@ -33,7 +33,7 @@ trap cleanup EXIT
 
 mkdir -p -- \
     "${TEST_HOME}/.pi/agent" \
-    "${TEST_HOME}/.config/opencode/agents" "${TEST_HOME}/.config/openspec" \
+    "${TEST_HOME}/.config/opencode/agents" \
     "${TEST_HOME}/.local/share/opencode" "${TEST_HOME}/.cache/opencode" \
     "${TEST_HOME}/.opencode" "${TEST_HOME}/.agents" "${TEST_HOME}/.bun" \
     "${TEST_HOME}/.cache/bun" "${TEST_HOME}/.opencode-browser" \
@@ -94,7 +94,7 @@ fail() {
 }
 
 output="$(run_box /bin/bash --noprofile --norc -lc \
-    'for d in "$HOME/.config/opencode" "$HOME/.config/openspec" "$HOME/.cache/opencode" "$HOME/.local/share/opencode" "$HOME/.opencode" "$HOME/.agents" "$HOME/.bun" "$HOME/.cache/bun" "$HOME/.opencode-browser"; do test -w "$d" || { printf "not-writable:%s" "$d"; exit 1; }; done; printf OC_STATE_RW' \
+    'for d in "$HOME/.config/opencode" "$HOME/.cache/opencode" "$HOME/.local/share/opencode" "$HOME/.opencode" "$HOME/.agents" "$HOME/.bun" "$HOME/.cache/bun" "$HOME/.opencode-browser"; do test -w "$d" || { printf "not-writable:%s" "$d"; exit 1; }; done; printf OC_STATE_RW' \
     -- "${TEST_PROJECT}" -q --no-aws --no-clipboard --no-ssh-agent 2>&1 || true)"
 [[ "${output}" == OC_STATE_RW ]] && pass 'Test P.1 PASS: complete OpenCode, Bun, agent, and browser state is writable' || fail "Test P.1 FAIL: ${output}"
 

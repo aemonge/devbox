@@ -1122,6 +1122,9 @@ bind_nearest_project_openspec() {
     local openspec_dir
     local logical_openspec_dir
     local source_openspec_dir
+    # The global XDG config root is user state, never a project tree; the
+    # footer walk must never mount it back into the box.
+    local global_openspec_config="${XDG_CONFIG_HOME:-${HOST_HOME}/.config}/openspec"
 
     if [[ "${TARGET_KIND}" == "dir" ]]; then
         logical_search_dir="${TARGET_PATH}"
@@ -1131,7 +1134,8 @@ bind_nearest_project_openspec() {
 
     while [[ -n "${logical_search_dir}" && "${logical_search_dir}" != "/" ]]; do
         openspec_dir="${logical_search_dir}/openspec"
-        if is_project_openspec_dir "${openspec_dir}"; then
+        if is_project_openspec_dir "${openspec_dir}" &&
+            [[ "${openspec_dir}" != "${global_openspec_config}" ]]; then
             resolve_project_openspec_source "${openspec_dir}"
             source_openspec_dir="${REPLY}"
             # If OpenSpec is inside the primary project bind, normal protected
@@ -1167,7 +1171,8 @@ bind_nearest_project_openspec() {
         -n "${resolved_logical_search_dir}" && "${resolved_logical_search_dir}" != "/" ]]; do
         source_openspec_dir="${resolved_source_search_dir}/openspec"
         logical_openspec_dir="${resolved_logical_search_dir}/openspec"
-        if is_project_openspec_dir "${source_openspec_dir}"; then
+        if is_project_openspec_dir "${source_openspec_dir}" &&
+            [[ "${logical_openspec_dir}" != "${global_openspec_config}" ]]; then
             add_prepared_bind_once --ro-bind "${source_openspec_dir}" "${logical_openspec_dir}"
             if [[ "${source_openspec_dir}" != "${logical_openspec_dir}" ]]; then
                 add_prepared_bind_once --ro-bind "${source_openspec_dir}" "${source_openspec_dir}"
@@ -2401,12 +2406,9 @@ bind_opencode_state() {
     local host_state_root="${XDG_STATE_HOME:-${HOST_HOME}/.local/state}"
     local host_cache_root="${XDG_CACHE_HOME:-${HOST_HOME}/.cache}"
     local host_opencode_config="${host_config_root}/opencode"
-    local host_openspec_config="${host_config_root}/openspec"
     local host_opencode_data="${host_data_root}/opencode"
     local host_opencode_state="${host_state_root}/opencode"
     local host_opencode_cache="${host_cache_root}/opencode"
-    local sandbox_openspec_config="${SANDBOX_HOME}/.config/openspec"
-    local openspec_destination_reserved=0
     local -a ephemeral_paths=(
         ".local/share/opencode"
         ".local/state/opencode"
@@ -2419,15 +2421,8 @@ bind_opencode_state() {
         ".opencode-browser"
     )
 
-    [[ -n "${EXTRA_BIND_DEST_SET[${sandbox_openspec_config}]:-}" ]] && openspec_destination_reserved=1
-
     if [[ "${EPHEMERAL_STATE}" -eq 1 ]]; then
         opt_ro_bind_dir "${host_opencode_config}" "${SANDBOX_HOME}/.config/opencode"
-        if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
-            opt_ro_bind_dir "${host_openspec_config}" "${sandbox_openspec_config}"
-        else
-            info "OpenSpec state: preserving the project-specific read-only mount"
-        fi
         opt_ro_bind_dir "${HOST_HOME}/.agents" "${SANDBOX_HOME}/.agents"
         opt_ro_bind_dir "${HOST_HOME}/.claude" "${SANDBOX_HOME}/.claude"
         for relative_path in "${ephemeral_paths[@]}"; do
@@ -2437,18 +2432,10 @@ bind_opencode_state() {
         bind_symlink_targets_in_dir --ro-bind "${host_opencode_config}"
         bind_symlink_targets_in_dir --ro-bind "${host_opencode_config}/agent"
         bind_symlink_targets_in_dir --ro-bind "${host_opencode_config}/agents"
-        if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
-            bind_symlink_targets_in_dir --ro-bind "${host_openspec_config}"
-        fi
         return 0
     fi
 
     bind_runtime_dir_created "${host_opencode_config}" "${SANDBOX_HOME}/.config/opencode"
-    if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
-        bind_runtime_dir "${host_openspec_config}" "${sandbox_openspec_config}"
-    else
-        info "OpenSpec state: preserving the project-specific read-only mount"
-    fi
     bind_runtime_dir_created "${host_opencode_data}" "${SANDBOX_HOME}/.local/share/opencode"
     # The Neovim editor bridge hands files to the host server through this
     # shared state path; a sandbox-only path is invisible to the host Neovim.
@@ -2470,9 +2457,6 @@ bind_opencode_state() {
     bind_symlink_targets_in_dir --bind "${host_opencode_config}"
     bind_symlink_targets_in_dir --bind "${host_opencode_config}/agent"
     bind_symlink_targets_in_dir --bind "${host_opencode_config}/agents"
-    if [[ "${openspec_destination_reserved}" -eq 0 ]]; then
-        bind_symlink_targets_in_dir --bind "${host_openspec_config}"
-    fi
 }
 
 prepare_ssh_client_integration() {

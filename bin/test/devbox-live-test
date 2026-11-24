@@ -469,10 +469,10 @@ PY
         fi
 
         # shellcheck disable=SC2016 # Variables expand inside the sandboxed shell.
-        output="$(run_validation_devbox -- "${symlink_logical_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'task_path="$HOME/.config/openspec/changes/symlink-validation/tasks.md"; cat "$task_path" >/dev/null || exit 1; if printf bad > "$task_path" 2>/dev/null; then printf SYMLINK_OPENSPEC_WRITE_ALLOWED; else printf SYMLINK_OPENSPEC_RO; fi' 2>&1 || true)"
-        if [[ "${output}" == *SYMLINK_OPENSPEC_RO* ]] && [[ "${output}" != *SYMLINK_OPENSPEC_WRITE_ALLOWED* ]] &&
+        output="$(run_validation_devbox -- "${symlink_logical_project}" -q --backend bwrap -x /bin/bash --noprofile --norc -lc 'task_path="$HOME/.config/openspec/changes/symlink-validation/tasks.md"; if [[ ! -e "$task_path" ]]; then printf SYMLINK_OPENSPEC_ABSENT; else printf SYMLINK_OPENSPEC_PRESENT; fi' 2>&1 || true)"
+        if [[ "${output}" == *SYMLINK_OPENSPEC_ABSENT* ]] && [[ "${output}" != *SYMLINK_OPENSPEC_PRESENT* ]] &&
             [[ "$(<"${symlink_source_project}/openspec/changes/symlink-validation/tasks.md")" == 'symlink-openspec' ]]; then
-            validation_pass 'Test B.8 PASS: symlinked config target sees resolved project OpenSpec read-only at logical path'
+            validation_pass 'Test B.8 PASS: symlinked config target leaves the global OpenSpec root out of the box'
         else
             validation_fail "Test B.8 FAIL: symlinked config target OpenSpec visibility/policy failed (${output})"
             failed_tests=$((failed_tests + 1))
