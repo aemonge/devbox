@@ -2,7 +2,7 @@ schema: spec
 created: 2026-11-16
 skip_specs: true
 
-x-status: proposed
+x-status: approved
 x-created_by: assistant
 
 x-granted: brainstorm,investigate,plan
@@ -11,3 +11,7 @@ x-granted_brainstorm: 2026-11-16T12:22:03Z
 x-granted_investigate: 2026-11-16T12:32:51Z
 
 x-granted_plan: 2026-11-16T13:32:57Z
+
+x-approved_at: 2026-11-24T09:56:17Z
+x-validated: 2026-11-24T09:56:17Z
+x-validated_at: 2026-11-24T09:56:17Z
